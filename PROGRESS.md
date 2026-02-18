@@ -8,7 +8,7 @@
 
 | Milestone | Description | Progress |
 |-----------|-------------|----------|
-| **M1** | Core Prototype (playable in browser) | ~65% |
+| **M1** | Core Prototype (playable in browser) | ~70% |
 | **M2** | Full Round Loop + Economy | ~10% |
 | **M3** | Online Multiplayer | ~5% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
@@ -53,7 +53,7 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 
 - [x] **Integration pass** — Fixed imports, reconciled types, core rendering compiles and runs
 - [ ] **Fog of war** — Texture-based visibility masking
-- [ ] **Basic AI opponent** — Simple bot that buys/moves/shoots for single-player testing
+- [x] **Basic AI opponent** — BotAI class with per-soldier state machine, preset strategies, engagement/rotation logic
 - [ ] **Utility system** — Smoke (blocks vision), flash (blinds), frag (area damage), molotov (area denial), decoy (fake sounds)
 - [ ] **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
 
@@ -190,12 +190,13 @@ shared/util/MathUtils.ts    — Vec2, distance, normalize, lerp, angleBetween, i
 shared/util/RandomUtils.ts  — mulberry32 PRNG, SeededRandom class (next, nextInt, shuffle, pick)
 ```
 
-### Client Game Logic (4 files)
+### Client Game Logic (5 files)
 ```
-client/src/game/GameState.ts      — Client-side game state, factory functions (needs reconciliation)
+client/src/game/GameState.ts      — Client-side game state, RuntimeStats, factory functions
 client/src/game/Game.ts           — Main orchestrator, game loop, phase transitions, input handling
 client/src/game/InputManager.ts   — Keyboard/mouse tracking, click queue, drag selection
 client/src/game/CommandSystem.ts  — Command queue with delays and cooldowns
+client/src/game/BotAI.ts          — AI opponent with per-soldier state machine, preset strategies
 ```
 
 ### Client Rendering (4 files)
@@ -231,7 +232,7 @@ shared/formulas/StatFormulas.ts  — Does not exist (was never created)
 shared/util/SeededRandom.ts      — Does not exist (SeededRandom is in RandomUtils.ts)
 ```
 
-**Total: ~28 unique source files, ~8,000+ lines of TypeScript**
+**Total: ~29 unique source files, ~9,000+ lines of TypeScript**
 
 ---
 
@@ -251,12 +252,14 @@ shared/util/SeededRandom.ts      — Does not exist (SeededRandom is in RandomUt
 
 ## Next Steps (In Order)
 
-1. ~~**Integration pass**~~ — DONE. Core game renders in browser via `npm run dev`.
-2. ~~**npm run dev**~~ — DONE. Vite serves the game on port 3000.
-3. **Wire in pathfinding** — Replace simple movement with A* from Movement.ts
-4. **Wire in detection** — Soldiers spot enemies using vision cones + LOS
-5. **Wire in combat** — Stat-driven firefights when soldiers detect each other
-6. **Basic AI** — Bot that moves soldiers and responds to contact
+1. ~~**Integration pass**~~ — DONE
+2. ~~**npm run dev**~~ — DONE
+3. ~~**Wire in pathfinding**~~ — DONE. A* pathfinding with path smoothing.
+4. ~~**Wire in detection**~~ — DONE. Vision cone + LOS + probabilistic detection.
+5. ~~**Wire in combat**~~ — DONE. Full stat-driven firefights.
+6. ~~**Basic AI**~~ — DONE. BotAI with per-soldier state machine.
 7. **Buy menu** — HTML overlay to purchase weapons/armor/utility
 8. **Utility system** — Throwable grenades with area effects
-9. **Server + networking** — Make it playable online
+9. **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
+10. **Fog of war** — Texture-based visibility masking
+11. **Server + networking** — Make it playable online

@@ -27,6 +27,7 @@ import { CommandSystem, CommandType } from './CommandSystem';
 import { MovementSystem } from '../simulation/Movement';
 import { DetectionSystem } from '../simulation/Detection';
 import { HUD } from '../ui/HUD';
+import { BuyMenu } from '../ui/BuyMenu';
 import { BotAI } from './BotAI';
 import {
   GamePhase,
@@ -125,6 +126,8 @@ export class Game {
   private detectionSystem: DetectionSystem | null = null;
   /** In-game HUD overlay showing score, timer, money, etc. */
   private hud: HUD;
+  /** Buy menu UI overlay for purchasing equipment */
+  private buyMenu: BuyMenu;
   /** AI opponent controlling player 2's soldiers */
   private botAI: BotAI | null = null;
 
@@ -181,6 +184,9 @@ export class Game {
 
     /* Initialize the HUD overlay */
     this.hud = new HUD('hud');
+
+    /* Initialize the buy menu (hidden by default, shown during BUY_PHASE) */
+    this.buyMenu = new BuyMenu('buy-menu');
 
     /* Create initial game state with a random seed */
     this.state = createInitialGameState(Date.now());
@@ -394,9 +400,26 @@ export class Game {
       this.issueCommand(CommandType.RETREAT, this.selectedSoldier);
     }
     if (this.input.wasKeyPressed('KeyB')) {
-      /* Toggle buy menu (only during buy phase) */
-      // TODO: Toggle buy menu UI
-      console.log('[Input] Buy menu toggle (TODO)');
+      /* Toggle buy menu — only during buy phase */
+      if (this.state.phase === GamePhase.BUY_PHASE) {
+        this.buyMenu.toggle();
+        if (this.buyMenu.isVisible()) {
+          /* Update the menu with current soldier/economy when opening */
+          const mySoldiers = this.localPlayer === 1
+            ? this.state.player1Soldiers
+            : this.state.player2Soldiers;
+          const myEconomy = this.localPlayer === 1
+            ? this.state.player1Economy
+            : this.state.player2Economy;
+          const selectedSoldier = this.selectedSoldier !== null
+            ? mySoldiers[this.selectedSoldier]
+            : null;
+          this.buyMenu.update(selectedSoldier, myEconomy, this.state.player1Side);
+        }
+      } else if (this.buyMenu.isVisible()) {
+        /* Close buy menu if it's open outside buy phase */
+        this.buyMenu.hide();
+      }
     }
     if (this.input.wasKeyPressed('Tab')) {
       /* Toggle scoreboard */
@@ -1440,6 +1463,25 @@ export class Game {
 
     /* Update the HUD overlay with current game state */
     this.hud.update(this.state, this.localPlayer, this.selectedSoldier);
+
+    /* Update the buy menu if it's visible */
+    if (this.buyMenu.isVisible()) {
+      const mySoldiers = this.localPlayer === 1
+        ? this.state.player1Soldiers
+        : this.state.player2Soldiers;
+      const myEconomy = this.localPlayer === 1
+        ? this.state.player1Economy
+        : this.state.player2Economy;
+      const selectedSoldier = this.selectedSoldier !== null
+        ? mySoldiers[this.selectedSoldier]
+        : null;
+      this.buyMenu.update(selectedSoldier, myEconomy, this.state.player1Side);
+
+      /* Auto-close the buy menu when leaving the buy phase */
+      if (this.state.phase !== GamePhase.BUY_PHASE) {
+        this.buyMenu.hide();
+      }
+    }
   }
 
   // ============================================================
