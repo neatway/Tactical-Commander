@@ -55,6 +55,89 @@ export type OnGameTickCallback = (data: {
   timeRemaining: number;
 }) => void;
 
+/**
+ * Fog-of-war filtered soldier state from the server.
+ * Contains position, health, weapon, and movement info for visible soldiers.
+ */
+export interface ServerSoldierState {
+  /** Index of this soldier in the team (0-4) */
+  index: number;
+  /** Reference ID to the soldier's persistent data */
+  soldierId: string;
+  /** Current world position */
+  position: { x: number; z: number };
+  /** Direction the soldier is facing, in radians */
+  rotation: number;
+  /** Current health points (0-100) */
+  health: number;
+  /** Whether the soldier is still alive */
+  alive: boolean;
+  /** Currently equipped weapon */
+  currentWeapon: string;
+  /** Whether the soldier is currently moving */
+  isMoving: boolean;
+  /** Whether the soldier is in active combat */
+  isInCombat: boolean;
+  /** Whether this soldier is planting the bomb */
+  isPlanting?: boolean;
+  /** Whether this soldier is defusing the bomb */
+  isDefusing?: boolean;
+}
+
+/**
+ * Fog-of-war filtered game state from the server.
+ * Each player receives a different view based on what their soldiers detect.
+ */
+export interface FilteredGameState {
+  /** All of the player's own soldiers (full state) */
+  ownSoldiers: ServerSoldierState[];
+  /** Enemy soldiers that are currently visible (detected) */
+  visibleEnemies: Partial<ServerSoldierState>[];
+  /** Whether the bomb has been planted */
+  bombPlanted: boolean;
+  /** Bomb position (null if not planted or not visible) */
+  bombPosition: { x: number; z: number } | null;
+  /** Bomb site identifier */
+  bombSite: string | null;
+  /** Bomb timer (only visible to defenders when planted) */
+  bombTimer: number;
+  /** Current tick number */
+  tick: number;
+}
+
+/** Kill record from the server simulation */
+export interface ServerKillRecord {
+  killerId: string;
+  victimId: string;
+  weapon: string;
+  headshot: boolean;
+  tick: number;
+}
+
+/**
+ * Callback type for authoritative game state updates from the server.
+ * Received every simulation tick (5/sec) during LIVE_PHASE and POST_PLANT.
+ * Contains fog-of-war filtered state — each player sees a different view.
+ */
+export type OnGameStateUpdateCallback = (data: {
+  tick: number;
+  phase: string;
+  timeRemaining: number;
+  state: FilteredGameState;
+  events: unknown[];
+  kills: ServerKillRecord[];
+}) => void;
+
+/**
+ * Callback type for bomb planted events from the server.
+ * Signals the transition from LIVE_PHASE to POST_PLANT.
+ */
+export type OnBombPlantedCallback = (data: {
+  tick: number;
+  bombPosition: { x: number; z: number };
+  bombSite: string;
+}) => void;
+
 /** Callback type for round end events */
 export type OnRoundEndCallback = (data: {
   winner: string;
@@ -117,8 +200,20 @@ export class SocketClient {
   /** Fired when the game phase changes (from server) */
   public onPhaseChange: OnPhaseChangeCallback | null = null;
 
-  /** Fired on each simulation tick during active phases */
+  /** Fired on each simulation tick during active phases (legacy heartbeat) */
   public onGameTick: OnGameTickCallback | null = null;
+
+  /**
+   * Fired on each authoritative state update from the server (5/sec).
+   * Contains fog-of-war filtered game state with own soldiers and visible enemies.
+   */
+  public onGameStateUpdate: OnGameStateUpdateCallback | null = null;
+
+  /**
+   * Fired when the bomb is planted.
+   * Signals transition from LIVE_PHASE to POST_PLANT.
+   */
+  public onBombPlanted: OnBombPlantedCallback | null = null;
 
   /** Fired when a round ends */
   public onRoundEnd: OnRoundEndCallback | null = null;
@@ -214,6 +309,24 @@ export class SocketClient {
 
     this.socket.on('GAME_TICK', (data) => {
       this.onGameTick?.(data);
+    });
+
+    /**
+     * GAME_STATE_UPDATE: Authoritative state from the server simulation.
+     * Contains fog-of-war filtered view for this player.
+     * Received 5 times/sec during LIVE_PHASE and POST_PLANT.
+     */
+    this.socket.on('GAME_STATE_UPDATE', (data) => {
+      this.onGameStateUpdate?.(data);
+    });
+
+    /**
+     * BOMB_PLANTED: The bomb has been planted.
+     * Triggers the LIVE_PHASE -> POST_PLANT transition.
+     */
+    this.socket.on('BOMB_PLANTED', (data) => {
+      console.log(`[SocketClient] Bomb planted at ${data.bombSite}`);
+      this.onBombPlanted?.(data);
     });
 
     this.socket.on('ROUND_END', (data) => {

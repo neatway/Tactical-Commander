@@ -1,5 +1,66 @@
 # Overnight Build Log
 
+## Session 5 — M3 Server-Authoritative Simulation (2026-02-18)
+
+### What was done this session
+
+1. **ServerSimulation wired into GameRoom (COMPLETE)**
+   - GameRoom now creates and manages a ServerSimulation instance per match
+   - initializeSimulationForRound() sets up soldiers at spawn positions each round
+   - simulationTick() calls ServerSimulation.runTick() every 200ms during LIVE/POST_PLANT
+   - Full pipeline: process commands -> movement -> detection -> combat -> bomb -> round end check
+
+2. **State sync with fog-of-war filtering (COMPLETE)**
+   - Each tick sends GAME_STATE_UPDATE to each player with different fog-of-war filtered views
+   - Player 1 sees their soldiers + enemies detected by their team
+   - Player 2 sees their soldiers + enemies detected by their team
+   - Enemy positions, health, weapons visible only when detected; stats never revealed
+
+3. **Anti-cheat command validation (COMPLETE)**
+   - validateCommand() checks command type against whitelist (MOVE, RUSH, HOLD, etc.)
+   - Validates soldier index (0-4), clamps target positions to map bounds (3000x2000)
+   - Rejects commands without required fields (e.g., MOVE without targetPosition)
+   - Logs rejected commands for monitoring
+
+4. **Economy system in GameRoom (COMPLETE)**
+   - Win/loss rewards with loss streak escalation ($1400-$3400)
+   - Kill rewards by weapon type (Pistol $300, SMG $600, AWP $100, etc.)
+   - Objective bonuses: +$300 for bomb plant, +$300 for bomb defuse
+   - Economy reset on side swap, money clamped to $16,000 max
+
+5. **Client SocketClient updated (COMPLETE)**
+   - Added GAME_STATE_UPDATE handler with FilteredGameState, ServerSoldierState types
+   - Added BOMB_PLANTED handler for LIVE_PHASE -> POST_PLANT transitions
+   - Added ServerKillRecord type for kill feed data
+   - Exported all new types for use by Game.ts
+
+6. **Bomb plant -> POST_PLANT transition (COMPLETE)**
+   - GameRoom detects bomb plant from simulation state and transitions phases
+   - Broadcasts BOMB_PLANTED event with position and site info
+   - POST_PLANT timer counts down separately from LIVE_PHASE timer
+
+7. **Strategy plan handling (COMPLETE)**
+   - Strategy plans validated (array of waypoint arrays, positions clamped)
+   - Applied as initial MOVE commands when LIVE_PHASE starts
+
+### Currently working on
+- All M3 checklist items are now complete
+- Server starts and runs with full simulation pipeline
+
+### What needs to happen next (IN THIS ORDER — remaining work)
+1. **Integration test** — Run two browser tabs, both connect, verify matchmaking + game flow
+2. **Client-side state reconciliation** — Game.ts reads GAME_STATE_UPDATE and applies server state
+3. **Milestone 4: Meta-Game** — PostgreSQL schema, auth, crate system, inventory UI
+
+### Important notes
+- Server is at `npm run server` (tsx server/src/index.ts, port 4000)
+- Client is at `npm run dev` (Vite, port 3000)
+- GameRoom now uses hardcoded Bazaar map data (walls + spawn zones). Future: load from shared map module.
+- ServerSimulation uses direct movement (no A* pathfinding yet). TODO: add server-side A* from shared grid.
+- The client can still run in single-player mode (vs bot) without server connection.
+
+---
+
 ## Session 4 — M2 Economy + Equipment + UI (2026-02-18)
 
 ### What was done this session

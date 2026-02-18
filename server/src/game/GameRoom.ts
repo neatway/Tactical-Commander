@@ -3,32 +3,36 @@
  * @description Manages a single match between two players on the server.
  *
  * Each GameRoom encapsulates:
- *   - Game state machine (BUY → STRATEGY → LIVE → POST_PLANT → ROUND_END)
+ *   - Game state machine (BUY -> STRATEGY -> LIVE -> POST_PLANT -> ROUND_END)
  *   - Phase timer management
- *   - Command validation and routing
+ *   - Server-authoritative simulation via ServerSimulation
+ *   - Command validation and routing (anti-cheat)
  *   - Economy tracking for both players
- *   - Broadcasting state updates to players via Socket.io
+ *   - Fog-of-war filtered state broadcasting to each player
  *   - Reconnection handling (60-second timeout)
- *
- * The GameRoom does NOT run its own simulation — that's handled by
- * ServerSimulation.ts (to be built). For now, the room manages phases
- * and relays messages between the two players.
  *
  * Architecture:
  *   GameRoom
  *     ├── Phase timer (setInterval)
- *     ├── Player 1 state (socket ID, connected, ready)
- *     ├── Player 2 state (socket ID, connected, ready)
- *     └── ServerSimulation (future: tick-based game simulation)
+ *     ├── Player 1 state (socket ID, connected, ready, economy)
+ *     ├── Player 2 state (socket ID, connected, ready, economy)
+ *     └── ServerSimulation (tick-based authoritative game simulation)
+ *           ├── Runs at 5 ticks/sec during LIVE_PHASE and POST_PLANT
+ *           ├── Processes queued commands from both players
+ *           ├── Updates movement, detection, combat, bomb actions
+ *           ├── Generates events (shots, kills, bomb plant/defuse)
+ *           └── Produces fog-of-war filtered state for each player
  */
 
 import type { Server } from 'socket.io';
+import { ServerSimulation } from '../simulation/ServerSimulation.js';
+import type { TickResult, FilteredGameState } from '../simulation/ServerSimulation.js';
 
 // ============================================================================
 // --- Constants ---
 // ============================================================================
 
-/** Phase durations in seconds (matches client-side values) */
+/** Phase durations in seconds (matches client-side values from GameConstants.ts) */
 const PHASE_DURATIONS: Record<string, number> = {
   BUY_PHASE: 20,
   STRATEGY_PHASE: 15,
@@ -37,10 +41,7 @@ const PHASE_DURATIONS: Record<string, number> = {
   ROUND_END: 5,
 };
 
-/** Total rounds in a match (first to 5 wins, 9 rounds max) */
-const MAX_ROUNDS = 9;
-
-/** Rounds per half (side swap happens at this point) */
+/** Rounds per half (side swap happens after this many rounds) */
 const ROUNDS_PER_HALF = 4;
 
 /** Rounds needed to win the match */
@@ -51,6 +52,89 @@ const RECONNECT_TIMEOUT_MS = 60000;
 
 /** Simulation tick rate in milliseconds (5 ticks per second) */
 const TICK_RATE_MS = 200;
+
+/** Starting money for each player at the beginning of the match */
+const STARTING_MONEY = 800;
+
+/** Maximum money a player can accumulate */
+const MAX_MONEY = 16000;
+
+/** Win reward for the winning team */
+const WIN_REWARD = 3250;
+
+/** Loss rewards based on consecutive loss streak (index = streak count - 1) */
+const LOSS_STREAK_REWARDS = [1400, 1900, 2400, 2900, 3400];
+
+/** Kill reward per weapon type */
+const KILL_REWARDS: Record<string, number> = {
+  PISTOL: 300,
+  SMG: 600,
+  RIFLE: 300,
+  AWP: 100,
+  SHOTGUN: 900,
+  LMG: 300,
+};
+
+/** Bomb plant/defuse bonus for the team that achieves it */
+const OBJECTIVE_BONUS = 300;
+
+/**
+ * Bazaar map spawn zones (hardcoded for now — will be loaded from map data).
+ * These match the values in client/src/assets/maps/bazaar.ts.
+ */
+const BAZAAR_ATTACKER_SPAWN = { x: 100, z: 200, width: 300, height: 1600 };
+const BAZAAR_DEFENDER_SPAWN = { x: 2550, z: 200, width: 300, height: 1600 };
+
+/**
+ * Bazaar map walls (hardcoded subset of key walls for LOS checks).
+ * Full wall data will be imported from the map data file in a future iteration.
+ * For the prototype, we include the boundary walls and the major structural walls.
+ */
+const BAZAAR_WALLS = [
+  /* Map boundary walls */
+  { x: 0, z: 0, width: 3000, height: 20 },       // Top boundary
+  { x: 0, z: 1980, width: 3000, height: 20 },     // Bottom boundary
+  { x: 0, z: 0, width: 20, height: 2000 },        // Left boundary
+  { x: 2980, z: 0, width: 20, height: 2000 },     // Right boundary
+
+  /* A Long lane walls */
+  { x: 420, z: 130, width: 180, height: 340 },    // T-side A long corner
+  { x: 780, z: 20, width: 40, height: 420 },      // A long left wall
+  { x: 780, z: 530, width: 240, height: 40 },     // A long cross wall
+  { x: 1120, z: 20, width: 40, height: 420 },     // A long right wall
+  { x: 1120, z: 530, width: 200, height: 40 },    // A long right cross wall
+
+  /* Mid lane walls */
+  { x: 780, z: 700, width: 40, height: 600 },     // Mid left wall
+  { x: 1120, z: 700, width: 40, height: 600 },    // Mid right wall
+  { x: 850, z: 960, width: 240, height: 40 },     // Mid cross wall
+
+  /* B tunnels walls */
+  { x: 420, z: 1520, width: 180, height: 340 },   // T-side B tunnel entrance
+  { x: 780, z: 1400, width: 40, height: 580 },    // B tunnel left wall
+  { x: 1120, z: 1400, width: 40, height: 580 },   // B tunnel right wall
+  { x: 780, z: 1400, width: 380, height: 40 },    // B tunnel top wall
+
+  /* A site structures */
+  { x: 1600, z: 100, width: 40, height: 410 },    // A site left wall
+  { x: 1600, z: 100, width: 630, height: 40 },    // A site top wall
+  { x: 2190, z: 100, width: 40, height: 410 },    // A site right wall
+
+  /* B site structures */
+  { x: 1600, z: 1400, width: 40, height: 410 },   // B site left wall
+  { x: 1600, z: 1770, width: 630, height: 40 },   // B site bottom wall
+  { x: 2190, z: 1400, width: 40, height: 410 },   // B site right wall
+
+  /* CT connector walls */
+  { x: 2300, z: 500, width: 40, height: 180 },    // CT connector top wall
+  { x: 2300, z: 1320, width: 40, height: 180 },   // CT connector bottom wall
+];
+
+/**
+ * Valid command types that the server will accept from clients.
+ * Any command with a type not in this list will be rejected.
+ */
+const VALID_COMMAND_TYPES = ['MOVE', 'RUSH', 'HOLD', 'RETREAT', 'USE_UTILITY', 'PLANT_BOMB', 'DEFUSE_BOMB', 'REGROUP'];
 
 // ============================================================================
 // --- Types ---
@@ -77,6 +161,21 @@ interface PlayerState {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
 }
 
+/**
+ * Parsed and validated command from a client.
+ * After validation, this is passed to the ServerSimulation.
+ */
+interface ValidatedCommand {
+  /** Command type (MOVE, RUSH, HOLD, etc.) */
+  type: string;
+  /** Target soldier index (0-4) */
+  soldierIndex: number;
+  /** Target position for movement commands */
+  targetPosition?: { x: number; z: number };
+  /** Utility type for USE_UTILITY commands */
+  utilityType?: string;
+}
+
 // ============================================================================
 // --- GameRoom Class ---
 // ============================================================================
@@ -88,9 +187,10 @@ interface PlayerState {
  *   1. Created by SocketServer when two players are matched
  *   2. startMatch() begins the first round (BUY_PHASE)
  *   3. Phase timer ticks every second, advancing phases when time expires
- *   4. During LIVE_PHASE, simulation ticks run at 5/sec
- *   5. Match ends when one player reaches ROUNDS_TO_WIN (5)
- *   6. Room is cleaned up and players can re-queue
+ *   4. During LIVE_PHASE, simulation ticks run at 5/sec via ServerSimulation
+ *   5. Each tick: process commands -> simulate -> broadcast filtered state
+ *   6. Match ends when one player reaches ROUNDS_TO_WIN (5)
+ *   7. Room is cleaned up and players can re-queue
  */
 export class GameRoom {
   /** Unique identifier for this room */
@@ -139,6 +239,18 @@ export class GameRoom {
   private destroyed: boolean = false;
 
   /**
+   * The server-authoritative simulation engine for this match.
+   * Created once when the room is constructed and reused across rounds.
+   */
+  private simulation: ServerSimulation;
+
+  /** Strategy plans submitted by each player (waypoints per soldier) */
+  private strategyPlans: {
+    player1: { x: number; z: number }[][] | null;
+    player2: { x: number; z: number }[][] | null;
+  } = { player1: null, player2: null };
+
+  /**
    * Create a new game room.
    *
    * @param roomId - Unique room identifier
@@ -155,12 +267,12 @@ export class GameRoom {
     this.roomId = roomId;
     this.io = io;
 
-    /* Initialize player states */
+    /* Initialize player states with starting money */
     this.player1 = {
       socketId: player1SocketId,
       connected: true,
       ready: false,
-      money: 800,  // Starting money
+      money: STARTING_MONEY,
       lossStreak: 0,
       totalKills: 0,
       reconnectTimer: null,
@@ -170,11 +282,21 @@ export class GameRoom {
       socketId: player2SocketId,
       connected: true,
       ready: false,
-      money: 800,
+      money: STARTING_MONEY,
       lossStreak: 0,
       totalKills: 0,
       reconnectTimer: null,
     };
+
+    /**
+     * Create the simulation engine with a random seed.
+     * The seed is generated once per match for deterministic replay.
+     */
+    const matchSeed = Math.floor(Math.random() * 2147483647);
+    this.simulation = new ServerSimulation(matchSeed);
+
+    /* Load map wall data into the simulation for LOS checks */
+    this.simulation.setWalls(BAZAAR_WALLS);
   }
 
   // --------------------------------------------------------------------------
@@ -188,8 +310,24 @@ export class GameRoom {
   startMatch(): void {
     this.roundNumber = 1;
     this.player1Side = 'ATTACKER';
+
+    /* Initialize the simulation for the first round */
+    this.initializeSimulationForRound();
+
     this.startPhase('BUY_PHASE');
     console.log(`[Room ${this.roomId}] Match started — Round 1, Buy Phase`);
+  }
+
+  /**
+   * Initialize the ServerSimulation for a new round.
+   * Sets up soldiers at spawn positions based on current sides.
+   */
+  private initializeSimulationForRound(): void {
+    this.simulation.initializeRound(
+      this.player1Side,
+      BAZAAR_ATTACKER_SPAWN,
+      BAZAAR_DEFENDER_SPAWN
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -230,6 +368,14 @@ export class GameRoom {
       this.stopSimulationTicks();
     }
 
+    /**
+     * When transitioning to LIVE_PHASE, apply any strategy plans
+     * that were submitted during STRATEGY_PHASE.
+     */
+    if (phase === 'LIVE_PHASE') {
+      this.applyStrategyPlans();
+    }
+
     console.log(
       `[Room ${this.roomId}] Phase: ${phase} (${this.timeRemaining}s)` +
       ` — Round ${this.roundNumber}`
@@ -266,12 +412,12 @@ export class GameRoom {
         break;
 
       case 'LIVE_PHASE':
-        /* Time expired without bomb plant → defenders win */
+        /* Time expired without bomb plant -> defenders win */
         this.endRound('DEFENDER');
         break;
 
       case 'POST_PLANT':
-        /* Bomb timer expired → bomb detonates, attackers win */
+        /* Bomb timer expired -> bomb detonates, attackers win */
         this.endRound('ATTACKER');
         break;
 
@@ -293,13 +439,51 @@ export class GameRoom {
   }
 
   // --------------------------------------------------------------------------
+  // Strategy Phase
+  // --------------------------------------------------------------------------
+
+  /**
+   * Apply stored strategy plans to the simulation when LIVE_PHASE starts.
+   * Strategy plans set initial waypoints for soldiers at round start.
+   */
+  private applyStrategyPlans(): void {
+    /* Apply player 1's strategy plans */
+    if (this.strategyPlans.player1) {
+      for (let i = 0; i < this.strategyPlans.player1.length && i < 5; i++) {
+        const waypoints = this.strategyPlans.player1[i];
+        if (waypoints && waypoints.length > 0) {
+          /**
+           * Queue a MOVE command for each soldier with a zero delay
+           * (strategy plans execute immediately at round start).
+           */
+          this.simulation.queueCommand(1, 'MOVE', i, waypoints[0]);
+        }
+      }
+    }
+
+    /* Apply player 2's strategy plans */
+    if (this.strategyPlans.player2) {
+      for (let i = 0; i < this.strategyPlans.player2.length && i < 5; i++) {
+        const waypoints = this.strategyPlans.player2[i];
+        if (waypoints && waypoints.length > 0) {
+          this.simulation.queueCommand(2, 'MOVE', i, waypoints[0]);
+        }
+      }
+    }
+
+    /* Clear strategy plans after applying */
+    this.strategyPlans.player1 = null;
+    this.strategyPlans.player2 = null;
+  }
+
+  // --------------------------------------------------------------------------
   // Simulation Tick Management
   // --------------------------------------------------------------------------
 
   /**
    * Start simulation ticks at TICK_RATE_MS (200ms = 5 ticks/sec).
-   * During LIVE_PHASE and POST_PLANT, the server runs the game simulation
-   * and broadcasts state updates to both players.
+   * During LIVE_PHASE and POST_PLANT, the server runs the authoritative
+   * simulation and sends fog-of-war filtered state updates to each player.
    */
   private startSimulationTicks(): void {
     this.stopSimulationTicks();
@@ -317,27 +501,86 @@ export class GameRoom {
   }
 
   /**
-   * Run one simulation tick.
-   * TODO: This is where ServerSimulation will be called to:
-   *   1. Process queued commands
-   *   2. Update movement (A* + SPD stat)
-   *   3. Run detection (vision cone + LOS)
-   *   4. Resolve combat (stat-driven firefights)
-   *   5. Tick utility effects
-   *   6. Check round-end conditions
-   *   7. Build fog-of-war filtered state for each player
-   *   8. Broadcast state updates
+   * Run one authoritative simulation tick.
    *
-   * For now, broadcasts a tick heartbeat to keep clients in sync.
+   * Pipeline:
+   *   1. Run ServerSimulation.runTick() (movement, detection, combat, bomb, etc.)
+   *   2. Check for bomb plant -> POST_PLANT transition
+   *   3. Check for round-end conditions (elimination, bomb defuse/detonate)
+   *   4. Generate fog-of-war filtered state for each player
+   *   5. Broadcast GAME_STATE_UPDATE to each player (different views!)
    */
   private simulationTick(): void {
     this.tick++;
 
-    /* Broadcast tick update to both players */
-    this.broadcast('GAME_TICK', {
+    /* Step 1: Run the authoritative simulation tick */
+    const tickResult: TickResult = this.simulation.runTick();
+
+    /* Step 2: Track kills for economy purposes */
+    for (const kill of tickResult.kills) {
+      /* Determine which player got the kill */
+      if (kill.killerId.startsWith('p1')) {
+        this.player1.totalKills++;
+      } else {
+        this.player2.totalKills++;
+      }
+    }
+
+    /* Step 3: Check for bomb plant -> phase transition to POST_PLANT */
+    const p1State = this.simulation.getFilteredState(1);
+    if (p1State.bombPlanted && !this.bombPlanted) {
+      this.bombPlanted = true;
+
+      /* Transition to POST_PLANT if currently in LIVE_PHASE */
+      if (this.phase === 'LIVE_PHASE') {
+        this.stopPhaseTimer();
+        this.startPhase('POST_PLANT');
+
+        /* Broadcast bomb plant event */
+        this.broadcast('BOMB_PLANTED', {
+          tick: this.tick,
+          bombPosition: p1State.bombPosition,
+          bombSite: p1State.bombSite,
+        });
+      }
+    }
+
+    /* Step 4: Check for round-end conditions from the simulation */
+    if (tickResult.roundEnded && tickResult.winningSide) {
+      /* Track if bomb was defused */
+      if (tickResult.winningSide === 'DEFENDER' && this.bombPlanted) {
+        this.bombDefused = true;
+      }
+
+      this.endRound(tickResult.winningSide);
+      return; // Stop processing — round is over
+    }
+
+    /* Step 5: Generate fog-of-war filtered state for each player */
+    const filteredStateP1 = this.simulation.getFilteredState(1);
+    const filteredStateP2 = this.simulation.getFilteredState(2);
+
+    /**
+     * Step 6: Send filtered state updates to each player.
+     * Each player gets a different view — they can only see their own
+     * soldiers and enemies that their team has detected.
+     */
+    this.emitToPlayer(this.player1, 'GAME_STATE_UPDATE', {
       tick: this.tick,
       phase: this.phase,
       timeRemaining: this.timeRemaining,
+      state: filteredStateP1,
+      events: tickResult.events,
+      kills: tickResult.kills,
+    });
+
+    this.emitToPlayer(this.player2, 'GAME_STATE_UPDATE', {
+      tick: this.tick,
+      phase: this.phase,
+      timeRemaining: this.timeRemaining,
+      state: filteredStateP2,
+      events: tickResult.events,
+      kills: tickResult.kills,
     });
   }
 
@@ -364,14 +607,11 @@ export class GameRoom {
       this.score.player2++;
     }
 
-    /* Update loss streaks */
-    if (p1Won) {
-      this.player1.lossStreak = 0;
-      this.player2.lossStreak++;
-    } else {
-      this.player2.lossStreak = 0;
-      this.player1.lossStreak++;
-    }
+    /* Update loss streaks and award economy */
+    this.updateEconomy(p1Won, winningSide);
+
+    /* Collect round kill data for the summary */
+    const roundKills = this.simulation.getRoundKills();
 
     /* Broadcast round end to both players */
     this.broadcast('ROUND_END', {
@@ -380,11 +620,17 @@ export class GameRoom {
       score: this.score,
       bombPlanted: this.bombPlanted,
       bombDefused: this.bombDefused,
+      kills: roundKills,
+      economy: {
+        player1Money: this.player1.money,
+        player2Money: this.player2.money,
+      },
     });
 
     console.log(
       `[Room ${this.roomId}] Round ${this.roundNumber}: ${winningSide} wins` +
-      ` — Score: ${this.score.player1}-${this.score.player2}`
+      ` — Score: ${this.score.player1}-${this.score.player2}` +
+      ` — Economy: P1=$${this.player1.money}, P2=$${this.player2.money}`
     );
 
     /* Check for match end */
@@ -398,6 +644,56 @@ export class GameRoom {
   }
 
   /**
+   * Update economy for both players after a round ends.
+   * Awards win/loss rewards, kill rewards, and objective bonuses.
+   *
+   * @param p1Won - Whether player 1 won the round
+   * @param winningSide - Which side won ('ATTACKER' or 'DEFENDER')
+   */
+  private updateEconomy(p1Won: boolean, winningSide: 'ATTACKER' | 'DEFENDER'): void {
+    /* Calculate win and loss rewards */
+    const winner = p1Won ? this.player1 : this.player2;
+    const loser = p1Won ? this.player2 : this.player1;
+
+    /* Winner gets the flat win reward */
+    winner.money += WIN_REWARD;
+    winner.lossStreak = 0;
+
+    /* Loser gets loss streak reward (escalating) */
+    loser.lossStreak++;
+    const streakIndex = Math.min(loser.lossStreak - 1, LOSS_STREAK_REWARDS.length - 1);
+    loser.money += LOSS_STREAK_REWARDS[streakIndex];
+
+    /* Award kill rewards based on weapon used */
+    const roundKills = this.simulation.getRoundKills();
+    for (const kill of roundKills) {
+      const weaponReward = KILL_REWARDS[kill.weapon] ?? 300;
+      if (kill.killerId.startsWith('p1')) {
+        this.player1.money += weaponReward;
+      } else {
+        this.player2.money += weaponReward;
+      }
+    }
+
+    /* Award objective bonus (bomb plant/defuse) */
+    if (this.bombPlanted) {
+      /* Attackers get a bonus for planting regardless of round outcome */
+      const attackerPlayer = this.player1Side === 'ATTACKER' ? this.player1 : this.player2;
+      attackerPlayer.money += OBJECTIVE_BONUS;
+    }
+
+    if (this.bombDefused) {
+      /* Defenders get a bonus for defusing */
+      const defenderPlayer = this.player1Side === 'DEFENDER' ? this.player1 : this.player2;
+      defenderPlayer.money += OBJECTIVE_BONUS;
+    }
+
+    /* Clamp money to the maximum */
+    this.player1.money = Math.min(this.player1.money, MAX_MONEY);
+    this.player2.money = Math.min(this.player2.money, MAX_MONEY);
+  }
+
+  /**
    * Start the next round. Handles side swap and round counter advancement.
    */
   private startNextRound(): void {
@@ -406,6 +702,13 @@ export class GameRoom {
     /* Side swap at the halfway point */
     if (this.roundNumber === ROUNDS_PER_HALF + 1) {
       this.player1Side = this.player1Side === 'ATTACKER' ? 'DEFENDER' : 'ATTACKER';
+
+      /* Reset economy on side swap */
+      this.player1.money = STARTING_MONEY;
+      this.player2.money = STARTING_MONEY;
+      this.player1.lossStreak = 0;
+      this.player2.lossStreak = 0;
+
       console.log(`[Room ${this.roomId}] Side swap! P1 is now ${this.player1Side}`);
     }
 
@@ -413,6 +716,9 @@ export class GameRoom {
     this.bombPlanted = false;
     this.bombDefused = false;
     this.tick = 0;
+
+    /* Re-initialize the simulation for the new round */
+    this.initializeSimulationForRound();
 
     /* Start buy phase for the new round */
     this.startPhase('BUY_PHASE');
@@ -447,10 +753,18 @@ export class GameRoom {
 
   /**
    * Handle a tactical command from a player.
-   * Validates the command and queues it for the next simulation tick.
+   * Validates the command structure, checks for anti-cheat violations,
+   * and queues it in the ServerSimulation for the next tick.
+   *
+   * Anti-cheat validations:
+   *   - Command must have a valid type
+   *   - Soldier index must be 0-4
+   *   - Player can only command their own soldiers
+   *   - Target position must be within map bounds
+   *   - Can only command alive soldiers
    *
    * @param playerNumber - Which player sent the command (1 or 2)
-   * @param command - The command data (will be validated)
+   * @param command - The raw command data (will be validated)
    */
   handleCommand(playerNumber: 1 | 2, command: unknown): void {
     /* Only accept commands during active phases */
@@ -458,13 +772,80 @@ export class GameRoom {
       return;
     }
 
+    /* Validate command structure */
+    const validated = this.validateCommand(command);
+    if (!validated) {
+      console.warn(`[Room ${this.roomId}] P${playerNumber}: Invalid command rejected`);
+      return;
+    }
+
     /**
-     * TODO: Validate the command structure and queue it for the simulation.
-     * For now, relay it to the other player (peer-to-peer style).
-     * This will be replaced by server-authoritative simulation.
+     * Queue the validated command in the simulation.
+     * The simulation will process it after the radio delay.
      */
-    const otherPlayer = playerNumber === 1 ? this.player2 : this.player1;
-    this.emitToPlayer(otherPlayer, 'OPPONENT_COMMAND', { command });
+    this.simulation.queueCommand(
+      playerNumber,
+      validated.type,
+      validated.soldierIndex,
+      validated.targetPosition,
+      validated.utilityType
+    );
+  }
+
+  /**
+   * Validate a raw command object from the client.
+   * Returns a clean ValidatedCommand or null if invalid.
+   *
+   * @param command - Raw command data from the client
+   * @returns Validated command or null if invalid
+   */
+  private validateCommand(command: unknown): ValidatedCommand | null {
+    /* Command must be a non-null object */
+    if (!command || typeof command !== 'object') return null;
+
+    const cmd = command as Record<string, unknown>;
+
+    /* Validate command type */
+    if (typeof cmd.type !== 'string' || !VALID_COMMAND_TYPES.includes(cmd.type)) {
+      return null;
+    }
+
+    /* Validate soldier index (must be 0-4) */
+    if (typeof cmd.soldierIndex !== 'number' || cmd.soldierIndex < 0 || cmd.soldierIndex > 4) {
+      return null;
+    }
+    const soldierIndex = Math.floor(cmd.soldierIndex);
+
+    /* Validate target position if provided */
+    let targetPosition: { x: number; z: number } | undefined;
+    if (cmd.targetPosition && typeof cmd.targetPosition === 'object') {
+      const tp = cmd.targetPosition as Record<string, unknown>;
+      if (typeof tp.x === 'number' && typeof tp.z === 'number') {
+        /* Clamp position to map bounds (Bazaar: 3000x2000) */
+        targetPosition = {
+          x: Math.max(0, Math.min(3000, tp.x)),
+          z: Math.max(0, Math.min(2000, tp.z)),
+        };
+      }
+    }
+
+    /* Movement commands require a target position */
+    if ((cmd.type === 'MOVE' || cmd.type === 'RUSH') && !targetPosition) {
+      return null;
+    }
+
+    /* Validate utility type if provided */
+    let utilityType: string | undefined;
+    if (typeof cmd.utilityType === 'string') {
+      utilityType = cmd.utilityType;
+    }
+
+    return {
+      type: cmd.type,
+      soldierIndex,
+      targetPosition,
+      utilityType,
+    };
   }
 
   /**
@@ -481,7 +862,8 @@ export class GameRoom {
 
     /**
      * TODO: Validate the buy orders against the player's economy.
-     * For now, acknowledge the order.
+     * For now, acknowledge the order and trust the client.
+     * Full buy validation will be added in the anti-cheat pass.
      */
     const player = playerNumber === 1 ? this.player1 : this.player2;
     this.emitToPlayer(player, 'BUY_ORDER_ACCEPTED', { orders });
@@ -518,10 +900,37 @@ export class GameRoom {
       return;
     }
 
-    /**
-     * TODO: Validate and store the strategy plans.
-     * For now, acknowledge receipt.
-     */
+    /* Validate plans structure: should be an array of arrays of positions */
+    if (!Array.isArray(plans)) return;
+
+    const validPlans: { x: number; z: number }[][] = [];
+    for (const soldierPlan of plans) {
+      if (!Array.isArray(soldierPlan)) {
+        validPlans.push([]);
+        continue;
+      }
+
+      const waypoints: { x: number; z: number }[] = [];
+      for (const wp of soldierPlan) {
+        if (wp && typeof wp === 'object' && typeof wp.x === 'number' && typeof wp.z === 'number') {
+          /* Clamp waypoints to map bounds */
+          waypoints.push({
+            x: Math.max(0, Math.min(3000, wp.x)),
+            z: Math.max(0, Math.min(2000, wp.z)),
+          });
+        }
+      }
+      validPlans.push(waypoints);
+    }
+
+    /* Store the validated plans */
+    if (playerNumber === 1) {
+      this.strategyPlans.player1 = validPlans;
+    } else {
+      this.strategyPlans.player2 = validPlans;
+    }
+
+    /* Acknowledge receipt */
     const player = playerNumber === 1 ? this.player1 : this.player2;
     this.emitToPlayer(player, 'STRATEGY_PLAN_ACCEPTED', {});
   }

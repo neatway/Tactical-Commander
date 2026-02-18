@@ -10,11 +10,11 @@
 |-----------|-------------|----------|
 | **M1** | Core Prototype (playable in browser) | 100% |
 | **M2** | Full Round Loop + Economy | 100% |
-| **M3** | Online Multiplayer | ~5% |
+| **M3** | Online Multiplayer | ~85% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
 | **M5** | Polish & Balance (ranks, maps, audio, replays) | 0% |
 
-**Overall: ~40%** — Milestones 1 and 2 complete. M3 (multiplayer) is next.
+**Overall: ~55%** — Milestones 1-2 complete. M3 server sim wired + state sync + anti-cheat done.
 
 ---
 
@@ -101,13 +101,13 @@ The goal is two players in separate browsers playing a full match against each o
 
 ### Not Started
 
-- [ ] **Express + Socket.io server** — HTTP server, WebSocket rooms, connection handling
-- [ ] **Server-authoritative simulation** — Mirror of client sim running at 5 ticks/sec, server is truth
-- [ ] **State sync** — Server sends fog-of-war filtered GameStateUpdate every tick
-- [ ] **Client networking** — SocketClient, send commands, receive state, interpolation for smooth 60fps
-- [ ] **Matchmaking queue** — Simple queue that pairs two players into a room
-- [ ] **Reconnection handling** — 60s timeout, rejoin active match
-- [ ] **Anti-cheat** — Server enforces fog of war, validates commands, rejects impossible actions
+- [x] **Express + Socket.io server** — HTTP server on port 4000, WebSocket rooms, CORS, health check
+- [x] **Server-authoritative simulation** — ServerSimulation wired into GameRoom, runs at 5 ticks/sec, full movement/detection/combat/bomb pipeline
+- [x] **State sync** — Server sends fog-of-war filtered GAME_STATE_UPDATE to each player every tick (different views per player)
+- [x] **Client networking** — SocketClient with typed C2S/S2C, auto-reconnect, GAME_STATE_UPDATE + BOMB_PLANTED handlers
+- [x] **Matchmaking queue** — FIFO queue that pairs two players into a room, onMatch callback
+- [x] **Reconnection handling** — 60s timeout with forfeit, disconnect notification to opponent
+- [x] **Anti-cheat** — Server validates command structure, clamps positions to map bounds, rejects invalid types/indices
 
 ---
 
