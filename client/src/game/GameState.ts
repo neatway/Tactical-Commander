@@ -106,6 +106,10 @@ export interface SoldierRuntimeState {
   detectedEnemies: string[];
   /** Number of consecutive shots fired in current engagement (for spray decay) */
   shotsFired: number;
+  /** Whether this soldier is currently blinded by a flash grenade */
+  isBlinded: boolean;
+  /** Seconds remaining on the flash blind effect (counts down each tick) */
+  blindedTimer: number;
 }
 
 /** Economy state for one team */
@@ -330,5 +334,7 @@ export function createSoldierRuntimeState(
     stats: createVariedStats(index),
     detectedEnemies: [],
     shotsFired: 0,
+    isBlinded: false,
+    blindedTimer: 0,
   };
 }

@@ -26,6 +26,7 @@ import { InputManager, MouseButton } from './InputManager';
 import { CommandSystem, CommandType } from './CommandSystem';
 import { MovementSystem } from '../simulation/Movement';
 import { DetectionSystem } from '../simulation/Detection';
+import { UtilitySystem } from '../simulation/Utility';
 import { HUD } from '../ui/HUD';
 import { BuyMenu } from '../ui/BuyMenu';
 import { BotAI } from './BotAI';
@@ -57,8 +58,9 @@ import {
   calculateReactionTime,
 } from '@shared/constants/StatFormulas';
 
-/* Weapon stat lookup table */
+/* Weapon stat lookup table and utility type enum */
 import { WEAPONS } from '@shared/constants/WeaponData';
+import { UtilityType } from '@shared/types/WeaponTypes';
 
 /* Seeded PRNG for deterministic combat */
 import { SeededRandom } from '@shared/util/RandomUtils';
@@ -128,6 +130,8 @@ export class Game {
   private hud: HUD;
   /** Buy menu UI overlay for purchasing equipment */
   private buyMenu: BuyMenu;
+  /** Utility system managing active smokes, flashes, frags, molotovs, decoys */
+  private utilitySystem: UtilitySystem;
   /** AI opponent controlling player 2's soldiers */
   private botAI: BotAI | null = null;
 
@@ -154,6 +158,12 @@ export class Game {
   private running: boolean = false;
   /** The requestAnimationFrame ID (for cancellation) */
   private animationFrameId: number = 0;
+  /**
+   * When the player presses 1-5 to select a utility slot, this stores
+   * the utility type waiting to be thrown. The next left-click on the
+   * map will throw this utility at that position, then clear the slot.
+   */
+  private pendingUtilityType: UtilityType | null = null;
 
   /**
    * Initialize all game systems.
@@ -187,6 +197,9 @@ export class Game {
 
     /* Initialize the buy menu (hidden by default, shown during BUY_PHASE) */
     this.buyMenu = new BuyMenu('buy-menu');
+
+    /* Initialize the utility system (manages active smokes, flashes, etc.) */
+    this.utilitySystem = new UtilitySystem();
 
     /* Create initial game state with a random seed */
     this.state = createInitialGameState(Date.now());
@@ -426,6 +439,42 @@ export class Game {
       // TODO: Toggle scoreboard UI
       console.log('[Input] Scoreboard toggle (TODO)');
     }
+
+    /* --- Utility slot selection (keys 1-4) --- */
+    /* Press a number key to select a utility slot, then click to throw */
+    if (this.selectedSoldier !== null && (
+      this.state.phase === GamePhase.LIVE_PHASE ||
+      this.state.phase === GamePhase.POST_PLANT
+    )) {
+      const mySoldiers = this.localPlayer === 1
+        ? this.state.player1Soldiers
+        : this.state.player2Soldiers;
+      const soldier = mySoldiers[this.selectedSoldier];
+
+      if (soldier && soldier.alive) {
+        /* Keys 1-4 map to utility inventory slots 0-3 */
+        const utilityKeys = ['Digit1', 'Digit2', 'Digit3', 'Digit4'];
+        for (let i = 0; i < utilityKeys.length; i++) {
+          if (this.input.wasKeyPressed(utilityKeys[i])) {
+            if (i < soldier.utility.length) {
+              this.pendingUtilityType = soldier.utility[i] as UtilityType;
+              console.log(`[Input] Utility slot ${i + 1} selected: ${this.pendingUtilityType}`);
+            } else {
+              console.log(`[Input] Utility slot ${i + 1} is empty`);
+              this.pendingUtilityType = null;
+            }
+          }
+        }
+
+        /* Escape cancels pending utility throw */
+        if (this.input.wasKeyPressed('Escape')) {
+          if (this.pendingUtilityType) {
+            console.log('[Input] Utility throw cancelled');
+            this.pendingUtilityType = null;
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -453,11 +502,26 @@ export class Game {
     );
 
     if (clickedSoldierIndex !== null) {
-      /* Clicked on a soldier - select it */
+      /* Clicked on a soldier - select it, and cancel any pending utility throw */
       this.selectedSoldier = clickedSoldierIndex;
+      this.pendingUtilityType = null;
       const prefix = this.localPlayer === 1 ? 'p1' : 'p2';
       this.soldierRenderer.setSelected(`${prefix}_${clickedSoldierIndex}`);
       console.log(`[Input] Selected soldier ${clickedSoldierIndex}`);
+    } else if (this.selectedSoldier !== null && this.pendingUtilityType !== null) {
+      /* Utility throw mode: click on map to throw the selected utility */
+      if (this.state.phase === GamePhase.LIVE_PHASE || this.state.phase === GamePhase.POST_PLANT) {
+        const soldier = mySoldiers[this.selectedSoldier];
+        if (soldier && soldier.alive) {
+          this.throwUtility(
+            this.selectedSoldier,
+            this.pendingUtilityType,
+            { x: worldPos.x, z: worldPos.z }
+          );
+        }
+        /* Clear pending utility after throwing */
+        this.pendingUtilityType = null;
+      }
     } else if (this.selectedSoldier !== null) {
       /* Clicked on empty map - issue move command to selected soldier */
       if (this.state.phase === GamePhase.LIVE_PHASE || this.state.phase === GamePhase.POST_PLANT) {
@@ -527,6 +591,59 @@ export class Game {
   }
 
   // ============================================================
+  // Utility Throwing
+  // ============================================================
+
+  /**
+   * Throw a utility item from a soldier's inventory to a target position.
+   *
+   * Removes the utility from the soldier's inventory and creates an active
+   * effect at the target position via the UtilitySystem.
+   *
+   * @param soldierIndex - Index of the soldier throwing the utility (0-4)
+   * @param utilityType - Which utility type to throw
+   * @param targetPos - World position to throw the utility at
+   */
+  private throwUtility(
+    soldierIndex: number,
+    utilityType: UtilityType,
+    targetPos: Position
+  ): void {
+    const mySoldiers = this.localPlayer === 1
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+
+    const soldier = mySoldiers[soldierIndex];
+    if (!soldier || !soldier.alive) return;
+
+    /* Find the utility in the soldier's inventory */
+    const utilIndex = soldier.utility.indexOf(utilityType);
+    if (utilIndex === -1) {
+      console.log(`[Utility] Soldier ${soldierIndex} doesn't have ${utilityType}`);
+      return;
+    }
+
+    /* Remove the utility from inventory (consume it) */
+    soldier.utility.splice(utilIndex, 1);
+
+    /* Determine which team this soldier is on */
+    const ownerTeam: 1 | 2 = this.localPlayer;
+
+    /* Create the active effect in the world */
+    this.utilitySystem.throwUtility(
+      utilityType,
+      targetPos,
+      soldier.soldierId,
+      ownerTeam
+    );
+
+    console.log(
+      `[Utility] Soldier ${soldierIndex} threw ${utilityType}` +
+      ` at (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})`
+    );
+  }
+
+  // ============================================================
   // Simulation - Fixed timestep updates
   // ============================================================
 
@@ -569,7 +686,10 @@ export class Game {
     /* Step 5: Run combat resolution for soldiers that detect each other */
     this.updateCombat();
 
-    /* Step 6: Check round end conditions */
+    /* Step 6: Tick utility effects (smoke, molotov DPS, flash timers) */
+    this.updateUtility();
+
+    /* Step 7: Check round end conditions */
     this.checkRoundEndConditions();
   }
 
@@ -784,6 +904,12 @@ export class Game {
         continue;
       }
 
+      /* Blinded soldiers can't detect anyone (flash grenade effect) */
+      if (soldier.isBlinded) {
+        soldier.detectedEnemies = [];
+        continue;
+      }
+
       /* Check each alive enemy through the full detection pipeline */
       const newDetected: string[] = [];
 
@@ -804,7 +930,19 @@ export class Game {
         );
 
         if (detected) {
-          newDetected.push(enemy.soldierId);
+          /**
+           * Additional check: smoke blocks LOS even if the geometry
+           * and probability checks pass. If a smoke cloud is between
+           * the observer and target, detection fails.
+           */
+          const blockedBySmoke = this.utilitySystem.isLOSBlockedBySmoke(
+            soldier.position,
+            enemy.position
+          );
+
+          if (!blockedBySmoke) {
+            newDetected.push(enemy.soldierId);
+          }
         }
       }
 
@@ -821,8 +959,9 @@ export class Game {
         const prevEnemy = enemies.find(e => e.soldierId === prevId);
         if (!prevEnemy || !prevEnemy.alive) continue;
 
-        /* Keep them detected if we still have LOS */
-        if (this.detectionSystem.hasLineOfSight(soldier.position, prevEnemy.position)) {
+        /* Keep them detected if we still have wall LOS AND no smoke blocks the view */
+        if (this.detectionSystem.hasLineOfSight(soldier.position, prevEnemy.position)
+            && !this.utilitySystem.isLOSBlockedBySmoke(soldier.position, prevEnemy.position)) {
           /**
            * Also verify they're still within detection range.
            * Use a generous 1.2x multiplier to prevent edge-case flickering
@@ -1043,6 +1182,14 @@ export class Game {
     shooterTeam: SoldierRuntimeState[],
     targetTeam: SoldierRuntimeState[]
   ): void {
+    /**
+     * Blinded soldiers cannot aim — skip their shot entirely.
+     * Flash grenades set isBlinded=true which prevents firing until it wears off.
+     */
+    if (shooter.isBlinded) {
+      return;
+    }
+
     /* Increment shot counter for spray tracking */
     shooter.shotsFired++;
 
@@ -1205,7 +1352,34 @@ export class Game {
   }
 
   // ============================================================
-  // Round End Conditions (Sim Step 5)
+  // Utility System (Sim Step 6)
+  // ============================================================
+
+  /**
+   * Tick all active utility effects and update blind timers.
+   *
+   * This method:
+   *   1. Ticks the UtilitySystem (applies frag/molotov damage, expires effects)
+   *   2. Ticks blind timers on all soldiers (flash blind wears off over time)
+   *
+   * Called once per simulation tick (every 200ms).
+   */
+  private updateUtility(): void {
+    const dt = TICK_RATE_MS / 1000;
+    const allSoldiers = [
+      ...this.state.player1Soldiers,
+      ...this.state.player2Soldiers,
+    ];
+
+    /* Tick active utility effects (applies molotov DPS, expires effects) */
+    this.utilitySystem.tick(dt, allSoldiers);
+
+    /* Tick blind timers on all soldiers */
+    this.utilitySystem.tickBlindTimers(dt, allSoldiers);
+  }
+
+  // ============================================================
+  // Round End Conditions (Sim Step 7)
   // ============================================================
 
   /**
@@ -1417,7 +1591,12 @@ export class Game {
       soldier.actionProgress = 0;
       soldier.detectedEnemies = [];
       soldier.shotsFired = 0;
+      soldier.isBlinded = false;
+      soldier.blindedTimer = 0;
     }
+
+    /* Clear all active utility effects from the previous round */
+    this.utilitySystem.clearAll();
 
     /* Re-initialize bot AI for the new round with updated side */
     if (this.botAI) {
