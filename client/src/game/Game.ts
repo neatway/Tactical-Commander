@@ -10,10 +10,11 @@
  *
  * Simulation tick order (each 200ms):
  *   1. Process ready commands
- *   2. Update movement (A* pathfinding + stat-driven speed)
- *   3. Run detection (vision cone + LOS + probabilistic detection)
- *   4. Run combat resolution (stat-driven firefights)
- *   5. Check round end conditions (elimination, timer)
+ *   2. Run bot AI decision-making (player 2)
+ *   3. Update movement (A* pathfinding + stat-driven speed)
+ *   4. Run detection (vision cone + LOS + probabilistic detection)
+ *   5. Run combat resolution (stat-driven firefights)
+ *   6. Check round end conditions (elimination, timer)
  */
 
 import * as THREE from 'three';
@@ -26,6 +27,7 @@ import { CommandSystem, CommandType } from './CommandSystem';
 import { MovementSystem } from '../simulation/Movement';
 import { DetectionSystem } from '../simulation/Detection';
 import { HUD } from '../ui/HUD';
+import { BotAI } from './BotAI';
 import {
   GamePhase,
   Side,
@@ -123,6 +125,8 @@ export class Game {
   private detectionSystem: DetectionSystem | null = null;
   /** In-game HUD overlay showing score, timer, money, etc. */
   private hud: HUD;
+  /** AI opponent controlling player 2's soldiers */
+  private botAI: BotAI | null = null;
 
   // --- Game state ---
   /** The complete current state of the game */
@@ -229,6 +233,15 @@ export class Game {
 
     /* Create soldiers for both teams at spawn positions */
     this.spawnSoldiers(BAZAAR_MAP);
+
+    /* Initialize the AI opponent for player 2 */
+    this.botAI = new BotAI(this.movementSystem);
+    /** Bot plays the opposite side to player 1 */
+    const botSide = this.state.player1Side === Side.ATTACKER
+      ? Side.DEFENDER
+      : Side.ATTACKER;
+    this.botAI.initializeRound(botSide);
+    console.log(`[Game] Bot AI initialized as ${botSide}`);
 
     /* Reset state for round 1 */
     this.state.phase = GamePhase.BUY_PHASE;
@@ -500,10 +513,11 @@ export class Game {
    *
    * Tick order:
    *   1. Process ready commands from the command queue
-   *   2. Update movement (A* + SPD stat)
-   *   3. Run detection (vision cone + LOS + AWR/STL stats)
-   *   4. Run combat resolution (ACC, REA, CMP, CLT, TWK stats)
-   *   5. Check round end conditions (all dead, timer expired)
+   *   2. Run bot AI decision-making (sets waypoints for P2 soldiers)
+   *   3. Update movement (A* + SPD stat)
+   *   4. Run detection (vision cone + LOS + AWR/STL stats)
+   *   5. Run combat resolution (ACC, REA, CMP, CLT, TWK stats)
+   *   6. Check round end conditions (all dead, timer expired)
    */
   private simulationTick(): void {
     this.state.tick++;
@@ -520,16 +534,19 @@ export class Game {
       this.executeCommand(cmd);
     }
 
-    /* Step 2: Update soldier movement (stat-driven speed) */
+    /* Step 2: Run AI decision-making for player 2's soldiers */
+    this.updateBotAI();
+
+    /* Step 3: Update soldier movement (stat-driven speed) */
     this.updateMovement();
 
-    /* Step 3: Run detection system (vision cone + LOS + probabilistic roll) */
+    /* Step 4: Run detection system (vision cone + LOS + probabilistic roll) */
     this.updateDetection();
 
-    /* Step 4: Run combat resolution for soldiers that detect each other */
+    /* Step 5: Run combat resolution for soldiers that detect each other */
     this.updateCombat();
 
-    /* Step 5: Check round end conditions */
+    /* Step 6: Check round end conditions */
     this.checkRoundEndConditions();
   }
 
@@ -585,7 +602,34 @@ export class Game {
   }
 
   // ============================================================
-  // Movement System (Sim Step 2)
+  // Bot AI (Sim Step 2)
+  // ============================================================
+
+  /**
+   * Run the bot AI's decision-making for player 2's soldiers.
+   * The AI sets waypoints directly on the soldiers (no command delay).
+   * Called once per simulation tick during LIVE_PHASE and POST_PLANT.
+   */
+  private updateBotAI(): void {
+    if (!this.botAI) return;
+
+    /**
+     * Determine which soldiers belong to the bot and which are enemies.
+     * The bot always controls player 2.
+     */
+    const botSoldiers = this.state.player2Soldiers;
+    const enemySoldiers = this.state.player1Soldiers;
+
+    this.botAI.update(
+      this.state,
+      botSoldiers,
+      enemySoldiers,
+      this.state.tick
+    );
+  }
+
+  // ============================================================
+  // Movement System (Sim Step 3)
   // ============================================================
 
   /**
@@ -1350,6 +1394,14 @@ export class Game {
       soldier.actionProgress = 0;
       soldier.detectedEnemies = [];
       soldier.shotsFired = 0;
+    }
+
+    /* Re-initialize bot AI for the new round with updated side */
+    if (this.botAI) {
+      const botSide = this.state.player1Side === Side.ATTACKER
+        ? Side.DEFENDER
+        : Side.ATTACKER;
+      this.botAI.initializeRound(botSide);
     }
 
     /* Start buy phase */
