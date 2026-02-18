@@ -48,6 +48,7 @@ import {
 } from '../../../shared/constants/StatFormulas.js';
 import { TIMING } from '../../../shared/constants/GameConstants.js';
 import { ServerPathfinding } from './ServerPathfinding.js';
+import { ServerUtilitySystem } from './ServerUtility.js';
 
 // ============================================================================
 // --- Types ---
@@ -287,6 +288,9 @@ export class ServerSimulation {
   /** A* pathfinding system for wall-aware movement (null until walls are set) */
   private pathfinder: ServerPathfinding | null = null;
 
+  /** Utility system managing smoke, flash, frag, molotov, decoy effects */
+  private utilitySystem: ServerUtilitySystem = new ServerUtilitySystem();
+
   /** Map width in game units (set when walls are loaded) */
   private mapWidth: number = 3000;
 
@@ -324,6 +328,7 @@ export class ServerSimulation {
     this.tick = 0;
     this.commandQueue = [];
     this.roundKills = [];
+    this.utilitySystem.clearAll();
     this.bombPlanted = false;
     this.bombPosition = null;
     this.bombSite = null;
@@ -490,13 +495,16 @@ export class ServerSimulation {
     kills.push(...combatKills);
     this.roundKills.push(...combatKills);
 
-    /* Step 5: Update blind timers (flash grenade effect) */
+    /* Step 5: Tick utility effects (smoke, molotov, flash, frag) */
+    this.updateUtility();
+
+    /* Step 6: Update blind timers (flash grenade effect) */
     this.updateBlindTimers();
 
-    /* Step 6: Update bomb actions (may generate BOMB_PLANTED, BOMB_DEFUSED, BOMB_EXPLODED) */
+    /* Step 7: Update bomb actions (may generate BOMB_PLANTED, BOMB_DEFUSED, BOMB_EXPLODED) */
     this.updateBombActions();
 
-    /* Step 7: Check round-end conditions */
+    /* Step 8: Check round-end conditions */
     const roundEnd = this.checkRoundEnd();
 
     return {
@@ -594,6 +602,44 @@ export class ServerSimulation {
           soldier.isMoving = false;
         }
         break;
+
+      case 'USE_UTILITY': {
+        /**
+         * Throw a utility item at the target position.
+         * Removes the utility from the soldier's inventory and creates
+         * an active effect on the map via the utility system.
+         */
+        if (cmd.utilityType && cmd.targetPosition && soldier.utility.length > 0) {
+          const utilIdx = soldier.utility.indexOf(cmd.utilityType);
+          if (utilIdx !== -1) {
+            /* Remove the utility from the soldier's inventory */
+            soldier.utility.splice(utilIdx, 1);
+
+            /* Create the utility effect on the map */
+            this.utilitySystem.throwUtility(
+              cmd.utilityType,
+              cmd.targetPosition,
+              soldier.soldierId,
+              cmd.playerNumber
+            );
+
+            /** Generate UTILITY_USED event */
+            this.tickEvents.push({
+              type: 'UTILITY_USED',
+              tick: this.tick,
+              data: {
+                soldierId: soldier.soldierId,
+                utilityType: cmd.utilityType,
+                originX: soldier.position.x,
+                originZ: soldier.position.z,
+                targetX: cmd.targetPosition.x,
+                targetZ: cmd.targetPosition.z,
+              },
+            });
+          }
+        }
+        break;
+      }
 
       case 'REGROUP': {
         /**
@@ -808,14 +854,21 @@ export class ServerSimulation {
 
   /**
    * Check line of sight between two positions.
-   * Returns false if any wall blocks the view.
+   * Returns false if any wall OR active smoke blocks the view.
    */
   private hasLineOfSight(a: Position, b: Position): boolean {
+    /* Check walls */
     for (const wall of this.walls) {
       if (this.lineIntersectsRect(a, b, wall)) {
         return false;
       }
     }
+
+    /* Check smoke clouds blocking LOS */
+    if (this.utilitySystem.isLOSBlockedBySmoke(a, b)) {
+      return false;
+    }
+
     return true;
   }
 
@@ -1105,7 +1158,22 @@ export class ServerSimulation {
   }
 
   // --------------------------------------------------------------------------
-  // Sim Step 5: Blind Timers
+  // Sim Step 5: Utility Effects
+  // --------------------------------------------------------------------------
+
+  /**
+   * Tick all active utility effects.
+   * Applies frag damage, flash blind, molotov DPS, and smoke/decoy timers.
+   * Called once per simulation tick.
+   */
+  private updateUtility(): void {
+    const dt = TICK_RATE_MS / 1000;
+    const allSoldiers = [...this.player1Soldiers, ...this.player2Soldiers];
+    this.utilitySystem.tick(dt, allSoldiers);
+  }
+
+  // --------------------------------------------------------------------------
+  // Sim Step 6: Blind Timers
   // --------------------------------------------------------------------------
 
   /**
