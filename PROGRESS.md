@@ -9,12 +9,12 @@
 | Milestone | Description | Progress |
 |-----------|-------------|----------|
 | **M1** | Core Prototype (playable in browser) | 100% |
-| **M2** | Full Round Loop + Economy | ~20% |
+| **M2** | Full Round Loop + Economy | 100% |
 | **M3** | Online Multiplayer | ~5% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
 | **M5** | Polish & Balance (ranks, maps, audio, replays) | 0% |
 
-**Overall: ~30%** — Milestone 1 complete. All core prototype systems implemented.
+**Overall: ~40%** — Milestones 1 and 2 complete. M3 (multiplayer) is next.
 
 ---
 
@@ -82,10 +82,10 @@ The goal is a complete round-to-round experience with buying, strategy planning,
 ### Not Started
 
 - [x] **Buy menu UI** — HTML overlay, per-soldier weapon/armor/utility purchases, cost display
-- [ ] **Strategy phase UI** — Waypoint editor, stance selection, timing links between soldiers
-- [ ] **Economy manager** — Kill rewards by weapon, bomb plant/defuse bonus ($300), proper round rewards
-- [ ] **Round summary screen** — Kill feed, MVP, economy changes, round winner display
-- [ ] **Equipment persistence** — Surviving soldiers keep their weapons next round
+- [x] **Strategy phase UI** — Waypoint editor, stance selection, soldier tabs, waypoint controls
+- [x] **Economy manager** — Kill rewards by weapon, bomb plant/defuse bonus ($300), proper round rewards
+- [x] **Round summary screen** — Kill feed, MVP, economy changes, round winner display
+- [x] **Equipment persistence** — Surviving soldiers keep their weapons next round, dead soldiers reset to pistol
 
 ---
 

@@ -1,5 +1,57 @@
 # Overnight Build Log
 
+## Session 4 — M2 Economy + Equipment + UI (2026-02-18)
+
+### What was done this session
+
+1. **Economy manager wired into Game.ts (COMPLETE)**
+   - EconomyManager.ts already written, now fully integrated in endRound()
+   - Calculates win/loss rewards, kill rewards by weapon, bomb plant/defuse bonuses
+   - applyUpdate() mutates both players' TeamEconomy objects
+   - Overtime money for round 9 tiebreaker via applyOvertimeMoney()
+
+2. **Equipment persistence (COMPLETE)**
+   - Surviving soldiers keep weapons, armor, helmet, utility between rounds
+   - Dead soldiers lose all equipment, reset to default pistol loadout
+   - Side swap (round 5) resets all equipment for fresh economy start
+   - Soldiers respawn at correct spawn positions between rounds
+   - Bomb carrier reassigned to first attacker soldier each round
+   - Added respawnSoldiersAtSpawn() method with cached map data
+
+3. **Round summary screen (COMPLETE)**
+   - Created `client/src/ui/RoundSummary.ts` — full DOM overlay
+   - Victory/defeat banner with gold/red coloring
+   - Kill feed: team-colored names, weapon tags, headshot stars
+   - Round MVP: top killer with headshot count
+   - Economy breakdown: round reward, kill rewards, objective bonus, new balance
+   - Round end method display (eliminated, bomb detonated, defused, time expired)
+   - Auto-shows during ROUND_END phase, hides on next BUY_PHASE
+
+4. **Strategy phase UI (COMPLETE)**
+   - Created `client/src/ui/StrategyEditor.ts` — bottom panel overlay
+   - Soldier selection tabs (1-5) with role labels (Entry, Support, AWP, Lurker, Anchor)
+   - Stance selector: AGGRESSIVE / DEFENSIVE / PASSIVE buttons
+   - Waypoint count display with clear button
+   - Equipment summary per soldier (weapon, armor, utility)
+   - Wired into Game.ts: auto-shows on STRATEGY_PHASE, hides on LIVE_PHASE
+   - Callbacks sync soldier selection, stance changes, and waypoint clears
+
+5. **MILESTONE 2: FULL ROUND LOOP + ECONOMY — 100% COMPLETE**
+   - All M2 checklist items done
+   - 34 modules compile and build successfully
+
+### Currently working on
+- Starting Milestone 3: Online Multiplayer
+
+### What needs to happen next (IN THIS ORDER — M3 Tasks)
+1. **Express + Socket.io server** — HTTP server, WebSocket rooms, connection handling
+2. **Server-authoritative simulation** — Mirror of client sim running at 5 ticks/sec
+3. **State sync** — Server sends fog-of-war filtered GameStateUpdate every tick
+4. **Client networking** — SocketClient, send commands, receive state
+5. **Matchmaking queue** — Simple queue that pairs two players into a room
+
+---
+
 ## Session 3 — Milestone 1 Complete (2026-02-18)
 
 ### What was done this session
