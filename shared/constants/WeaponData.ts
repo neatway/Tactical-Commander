@@ -5,7 +5,8 @@
 // Used by the buy phase UI, simulation engine, and economy system.
 // ============================================================================
 
-import type { WeaponId, ArmorType, UtilityType, WeaponStats, ArmorStats, UtilityStats } from '../types/WeaponTypes';
+import { WeaponId, ArmorType, UtilityType } from '../types/WeaponTypes';
+import type { WeaponStats, ArmorStats, UtilityStats } from '../types/WeaponTypes';
 
 // ----------------------------------------------------------------------------
 // WEAPON DEFINITIONS
@@ -20,9 +21,9 @@ import type { WeaponId, ArmorType, UtilityType, WeaponStats, ArmorStats, Utility
  * Design philosophy:
  * - Cheap weapons (PISTOL, SMG) have high kill rewards to reward eco-round plays
  * - Expensive weapons (AWP, LMG) have low kill rewards since they are powerful
- * - Fire rate is in milliseconds between shots (lower = faster)
- * - accMod multiplies the soldier base accuracy (>1.0 means the weapon helps aim)
- * - speedMod multiplies movement speed (heavier weapons slow you down)
+ * - fireRateMs is in milliseconds between shots (lower = faster)
+ * - accuracyModifier multiplies the soldier base accuracy (>1.0 means the weapon helps aim)
+ * - speedModifier multiplies movement speed (heavier weapons slow you down)
  */
 export const WEAPONS: Record<WeaponId, WeaponStats> = {
   /**
@@ -32,15 +33,17 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
    * Medium range makes it versatile but not dominant at any distance.
    */
   PISTOL: {
-    cost: 200,          // Cheapest weapon, always affordable
-    bodyDmg: 25,        // 4 body shots to kill (100 HP, no armor)
-    headMult: 2.5,      // 62.5 headshot damage -> 2 headshots to kill
-    fireRate: 400,      // 2.5 shots per second (semi-auto feel)
-    mag: 12,            // Small magazine, rewards accuracy
-    accMod: 0.85,       // Slightly reduces base accuracy (small sights)
-    speedMod: 0.95,     // Very light, minimal speed penalty
-    killReward: 300,    // Standard kill reward
-    range: 'MEDIUM',    // Effective at moderate distances
+    id: WeaponId.PISTOL,
+    name: "Pistol",
+    cost: 200,                  // Cheapest weapon, always affordable
+    bodyDamage: 25,             // 4 body shots to kill (100 HP, no armor)
+    headshotMultiplier: 2.5,    // 62.5 headshot damage -> 2 headshots to kill
+    fireRateMs: 400,            // 2.5 shots per second (semi-auto feel)
+    magazineSize: 12,           // Small magazine, rewards accuracy
+    accuracyModifier: 0.85,     // Slightly reduces base accuracy (small sights)
+    speedModifier: 0.95,        // Very light, minimal speed penalty
+    killReward: 300,            // Standard kill reward
+    rangeRating: 'MEDIUM',      // Effective at moderate distances
   },
 
   /**
@@ -50,15 +53,17 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
    * Low accuracy and short range limit effectiveness at distance.
    */
   SMG: {
-    cost: 1200,         // Affordable force-buy option
-    bodyDmg: 22,        // 5 body shots to kill (no armor)
-    headMult: 2.0,      // 44 headshot damage -> 3 headshots to kill
-    fireRate: 100,      // 10 shots per second (full-auto spray)
-    mag: 30,            // Large magazine for sustained fire
-    accMod: 0.80,       // Poor base accuracy (spray weapon)
-    speedMod: 0.90,     // Light weapon, decent mobility
-    killReward: 600,    // Double standard reward (high risk close-range play)
-    range: 'SHORT',     // Only effective in close quarters
+    id: WeaponId.SMG,
+    name: "SMG",
+    cost: 1200,                 // Affordable force-buy option
+    bodyDamage: 22,             // 5 body shots to kill (no armor)
+    headshotMultiplier: 2.0,    // 44 headshot damage -> 3 headshots to kill
+    fireRateMs: 100,            // 10 shots per second (full-auto spray)
+    magazineSize: 30,           // Large magazine for sustained fire
+    accuracyModifier: 0.80,     // Poor base accuracy (spray weapon)
+    speedModifier: 0.90,        // Light weapon, decent mobility
+    killReward: 600,            // Double standard reward (high risk close-range play)
+    rangeRating: 'SHORT',       // Only effective in close quarters
   },
 
   /**
@@ -68,15 +73,17 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
    * Accuracy modifier of 1.0 means it uses the soldier true accuracy.
    */
   RIFLE: {
-    cost: 2700,         // Standard full-buy primary
-    bodyDmg: 30,        // 4 body shots to kill (no armor)
-    headMult: 4.0,      // 120 headshot damage -> instant headshot kill!
-    fireRate: 120,      // ~8.3 shots per second (burst/tap-fire effective)
-    mag: 30,            // Standard magazine
-    accMod: 1.0,        // Neutral accuracy (soldier true skill shows)
-    speedMod: 0.85,     // Moderate weight, noticeable speed reduction
-    killReward: 300,    // Standard kill reward
-    range: 'LONG',      // Effective at long range
+    id: WeaponId.RIFLE,
+    name: "Assault Rifle",
+    cost: 2700,                 // Standard full-buy primary
+    bodyDamage: 30,             // 4 body shots to kill (no armor)
+    headshotMultiplier: 4.0,    // 120 headshot damage -> instant headshot kill!
+    fireRateMs: 120,            // ~8.3 shots per second (burst/tap-fire effective)
+    magazineSize: 30,           // Standard magazine
+    accuracyModifier: 1.0,      // Neutral accuracy (soldier true skill shows)
+    speedModifier: 0.85,        // Moderate weight, noticeable speed reduction
+    killReward: 300,            // Standard kill reward
+    rangeRating: 'LONG',        // Effective at long range
   },
 
   /**
@@ -87,34 +94,38 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
    * Heaviest weapon in the game (0.78 speed modifier).
    */
   AWP: {
-    cost: 4750,         // Most expensive weapon, major economy investment
-    bodyDmg: 85,        // Near one-shot kill to body (85 damage)
-    headMult: 1.2,      // 102 headshot damage -> guaranteed one-shot headshot
-    fireRate: 1500,     // 0.67 shots per second (bolt-action feel)
-    mag: 5,             // Tiny magazine, every shot counts
-    accMod: 1.15,       // BEST accuracy modifier (scope advantage)
-    speedMod: 0.78,     // Heaviest weapon, severe speed penalty
-    killReward: 100,    // Lowest reward (weapon is already very powerful)
-    range: 'VERY_LONG', // Maximum effective range
+    id: WeaponId.AWP,
+    name: "AWP",
+    cost: 4750,                 // Most expensive weapon, major economy investment
+    bodyDamage: 85,             // Near one-shot kill to body (85 damage)
+    headshotMultiplier: 1.2,    // 102 headshot damage -> guaranteed one-shot headshot
+    fireRateMs: 1500,           // 0.67 shots per second (bolt-action feel)
+    magazineSize: 5,            // Tiny magazine, every shot counts
+    accuracyModifier: 1.15,     // BEST accuracy modifier (scope advantage)
+    speedModifier: 0.78,        // Heaviest weapon, severe speed penalty
+    killReward: 100,            // Lowest reward (weapon is already very powerful)
+    rangeRating: 'VERY_LONG',   // Maximum effective range
   },
 
   /**
    * SHOTGUN - Point-blank devastation.
-   * bodyDmg of 18 represents EACH of 8 pellets (18 x 8 = 144 max damage).
+   * bodyDamage of 18 represents EACH of 8 pellets (18 x 8 = 144 max damage).
    * At close range, all pellets hit for a guaranteed one-shot kill.
    * At distance, pellets spread and fewer connect, making it useless.
    * Highest kill reward (900) massively rewards getting close enough.
    */
   SHOTGUN: {
-    cost: 1800,         // Mid-range cost, situational purchase
-    bodyDmg: 18,        // Per-pellet damage (x8 pellets = 144 max total body damage)
-    headMult: 1.0,      // No headshot bonus (pellet spread is random)
-    fireRate: 900,      // ~1.1 shots per second (pump-action feel)
-    mag: 7,             // Tube magazine, slow reload per shell
-    accMod: 0.70,       // Worst accuracy (spread is the point)
-    speedMod: 0.90,     // Moderate weight, decent mobility for rushing
-    killReward: 900,    // Highest reward (extreme risk required to use)
-    range: 'VERY_SHORT', // Only effective at point-blank range
+    id: WeaponId.SHOTGUN,
+    name: "Shotgun",
+    cost: 1800,                 // Mid-range cost, situational purchase
+    bodyDamage: 18,             // Per-pellet damage (x8 pellets = 144 max total body damage)
+    headshotMultiplier: 1.0,    // No headshot bonus (pellet spread is random)
+    fireRateMs: 900,            // ~1.1 shots per second (pump-action feel)
+    magazineSize: 7,            // Tube magazine, slow reload per shell
+    accuracyModifier: 0.70,     // Worst accuracy (spread is the point)
+    speedModifier: 0.90,        // Moderate weight, decent mobility for rushing
+    killReward: 900,            // Highest reward (extreme risk required to use)
+    rangeRating: 'SHORT',       // Only effective at close range (VERY_SHORT not in type)
   },
 
   /**
@@ -124,15 +135,17 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
    * Best used for holding angles and suppressing enemy movement.
    */
   LMG: {
-    cost: 5200,         // Very expensive, committed purchase
-    bodyDmg: 28,        // 4 body shots to kill (no armor)
-    headMult: 3.0,      // 84 headshot damage -> 2 headshots to kill
-    fireRate: 80,       // 12.5 shots per second (fastest fire rate)
-    mag: 100,           // Enormous magazine for sustained suppression
-    accMod: 0.90,       // Slightly below neutral (hard to control)
-    speedMod: 0.80,     // Very heavy, significant speed penalty
-    killReward: 300,    // Standard kill reward
-    range: 'LONG',      // Effective at long range (belt-fed stability)
+    id: WeaponId.LMG,
+    name: "Light Machine Gun",
+    cost: 5200,                 // Very expensive, committed purchase
+    bodyDamage: 28,             // 4 body shots to kill (no armor)
+    headshotMultiplier: 3.0,    // 84 headshot damage -> 2 headshots to kill
+    fireRateMs: 80,             // 12.5 shots per second (fastest fire rate)
+    magazineSize: 100,          // Enormous magazine for sustained suppression
+    accuracyModifier: 0.90,     // Slightly below neutral (hard to control)
+    speedModifier: 0.80,        // Very heavy, significant speed penalty
+    killReward: 300,            // Standard kill reward
+    rangeRating: 'LONG',        // Effective at long range (belt-fed stability)
   },
 } as const;
 
@@ -148,7 +161,7 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
  * Damage reduction is applied as: finalDmg = baseDmg * (1 - reduction)
  * Example: 30 body damage with HEAVY_ARMOR -> 30 * (1 - 0.50) = 15 damage
  *
- * Speed penalty stacks multiplicatively with weapon speedMod:
+ * Speed penalty stacks multiplicatively with weapon speedModifier:
  * Example: RIFLE(0.85) + HEAVY_ARMOR(0.92) -> effective speedMod = 0.85 * 0.92 = 0.782
  */
 export const ARMOR: Record<ArmorType, ArmorStats> = {
@@ -159,6 +172,7 @@ export const ARMOR: Record<ArmorType, ArmorStats> = {
    * Good for eco/force-buy rounds where full armor is too expensive.
    */
   LIGHT_VEST: {
+    type: ArmorType.LIGHT_VEST,
     cost: 400,            // Affordable protection
     bodyReduction: 0.30,  // 30% body damage reduction
     legReduction: 0,      // No leg protection
@@ -172,6 +186,7 @@ export const ARMOR: Record<ArmorType, ArmorStats> = {
    * Standard purchase on full-buy rounds.
    */
   HEAVY_ARMOR: {
+    type: ArmorType.HEAVY_ARMOR,
     cost: 1000,           // Significant investment
     bodyReduction: 0.50,  // 50% body damage reduction (halves body damage)
     legReduction: 0.15,   // 15% leg damage reduction
@@ -203,6 +218,7 @@ export const UTILITY: Record<UtilityType, UtilityStats> = {
    * Deals no damage. Essential for executing bomb plants and retakes.
    */
   SMOKE: {
+    type: UtilityType.SMOKE,
     cost: 300,     // Moderately priced for its strategic value
     duration: 18,  // 18 seconds of vision denial
     radius: 150,   // 150px radius smoke cloud
@@ -216,6 +232,7 @@ export const UTILITY: Record<UtilityType, UtilityStats> = {
    * Large radius but short duration means timing is critical.
    */
   FLASH: {
+    type: UtilityType.FLASH,
     cost: 200,     // Cheapest utility item
     duration: 2,   // 2 seconds of blindness
     radius: 400,   // 400px effect radius (large, but must face it)
@@ -230,6 +247,7 @@ export const UTILITY: Record<UtilityType, UtilityStats> = {
    * Instant detonation (duration=0) after thrown trajectory completes.
    */
   FRAG: {
+    type: UtilityType.FRAG,
     cost: 300,     // Same price as smoke
     duration: 0,   // Instant explosion (no lingering effect)
     radius: 200,   // 200px blast radius
@@ -244,6 +262,7 @@ export const UTILITY: Record<UtilityType, UtilityStats> = {
    * Maximum potential damage: 7 * 25 = 175 (if standing in fire the entire time).
    */
   MOLOTOV: {
+    type: UtilityType.MOLOTOV,
     cost: 400,     // Most expensive utility (powerful area denial)
     duration: 7,   // 7 seconds of area denial
     radius: 120,   // 120px fire radius (tight area)
@@ -258,6 +277,7 @@ export const UTILITY: Record<UtilityType, UtilityStats> = {
    * Deals no damage and has no physical effect.
    */
   DECOY: {
+    type: UtilityType.DECOY,
     cost: 50,      // Dirt cheap, throwaway purchase
     duration: 10,  // 10 seconds of fake gunfire
     radius: 300,   // 300px audio effect radius
@@ -290,7 +310,7 @@ export const DEFUSE_KIT_COST: number = 400;
  * Fraction by which a helmet reduces the headshot damage multiplier.
  * Applied as: effectiveMult = 1 + (headMult - 1) * (1 - HELMET_HEADSHOT_REDUCTION)
  *
- * Example with RIFLE (headMult=4.0) and helmet:
+ * Example with RIFLE (headshotMultiplier=4.0) and helmet:
  *   effectiveMult = 1 + (4.0 - 1) * (1 - 0.5) = 1 + 3.0 * 0.5 = 2.5
  *   Damage: 30 * 2.5 = 75 (survives!) vs 30 * 4.0 = 120 (instant kill without helmet)
  *
