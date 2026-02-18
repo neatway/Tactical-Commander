@@ -170,39 +170,36 @@ watch_commits() {
     done
 }
 
-# --- Helper: send a status heartbeat to Discord every 5 minutes ---
+# --- Helper: send Claude's latest output to Discord every 2 minutes ---
 heartbeat() {
     local beat_count=0
+    local last_line_count=0
 
     while true; do
-        sleep 300  # 5 minutes
+        sleep 120  # 2 minutes
         beat_count=$((beat_count + 1))
-        local mins=$((beat_count * 5))
+        local mins=$((beat_count * 2))
 
-        # Gather current status info
-        local recent_log
-        recent_log=$(tail -8 "$LOG_FILE" 2>/dev/null | grep -v '^\[' | head -5)
-        if [ -z "$recent_log" ]; then
-            recent_log=$(tail -5 "$LOG_FILE" 2>/dev/null)
+        # Get total lines in log now vs last check — grab only the NEW lines
+        local current_line_count
+        current_line_count=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+
+        local recent_output=""
+        if [ "$current_line_count" -gt "$last_line_count" ]; then
+            # Grab the new lines since last heartbeat, take last 15
+            recent_output=$(tail -n +"$((last_line_count + 1))" "$LOG_FILE" 2>/dev/null | tail -15)
+        else
+            recent_output=$(tail -10 "$LOG_FILE" 2>/dev/null)
         fi
+        last_line_count=$current_line_count
 
-        local git_status
-        git_status=$(cd "$PROJECT_DIR" && git log --oneline -3 2>/dev/null)
+        # Truncate long lines so Discord doesn't choke
+        recent_output=$(echo "$recent_output" | cut -c1-120)
 
-        local overnight_status=""
-        if [ -f "$OVERNIGHT_LOG" ]; then
-            # Grab the last "what's next" or recent lines
-            overnight_status=$(tail -6 "$OVERNIGHT_LOG" 2>/dev/null)
-        fi
+        local desc="**Session #$SESSION_COUNT** | ${mins}min in\n\n"
+        desc+="**Claude's latest output:**\n\`\`\`\n$recent_output\n\`\`\`"
 
-        # Build heartbeat message
-        local desc="**Session #$SESSION_COUNT** | ${mins}min elapsed\n\n"
-        desc+="**Recent commits:**\n\`\`\`\n$git_status\n\`\`\`\n"
-        if [ -n "$overnight_status" ]; then
-            desc+="**OVERNIGHT-LOG (latest):**\n\`\`\`\n$overnight_status\n\`\`\`"
-        fi
-
-        discord_embed "Heartbeat (${mins}m)" "$desc" "8421504"
+        discord_embed "Activity (${mins}m)" "$desc" "8421504"
     done
 }
 
