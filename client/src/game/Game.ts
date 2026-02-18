@@ -16,6 +16,8 @@ import { SoldierRenderer } from '../rendering/SoldierRenderer';
 import { CameraController } from '../rendering/Camera';
 import { InputManager, MouseButton } from './InputManager';
 import { CommandSystem, CommandType } from './CommandSystem';
+import { MovementSystem } from '../simulation/Movement';
+import { HUD } from '../ui/HUD';
 import {
   GamePhase,
   Side,
@@ -72,6 +74,10 @@ export class Game {
   private input: InputManager;
   /** Manages command queue with delays and cooldowns */
   private commandSystem: CommandSystem;
+  /** A* pathfinding system - created when the map loads */
+  private movementSystem: MovementSystem | null = null;
+  /** In-game HUD overlay showing score, timer, money, etc. */
+  private hud: HUD;
 
   // --- Game state ---
   /** The complete current state of the game */
@@ -120,6 +126,9 @@ export class Game {
     /* Initialize command system */
     this.commandSystem = new CommandSystem();
 
+    /* Initialize the HUD overlay */
+    this.hud = new HUD('hud');
+
     /* Create initial game state with a random seed */
     this.state = createInitialGameState(Date.now());
 
@@ -141,6 +150,10 @@ export class Game {
     /* TODO: Dynamic map loading - for now we import directly */
     const { BAZAAR_MAP } = await import('../assets/maps/bazaar');
     this.mapRenderer.loadMap(BAZAAR_MAP);
+
+    /* Initialize pathfinding on the loaded map */
+    this.movementSystem = new MovementSystem(BAZAAR_MAP);
+    console.log('[Game] Pathfinding grid generated for Bazaar');
 
     /* Update camera bounds to match loaded map */
     this.cameraController = new CameraController(
@@ -352,7 +365,7 @@ export class Game {
           z: worldPos.z,
         });
       } else if (this.state.phase === GamePhase.STRATEGY_PHASE) {
-        /* During strategy phase, add waypoint */
+        /* During strategy phase, add waypoint (direct placement, no A*) */
         const soldier = mySoldiers[this.selectedSoldier];
         if (soldier) {
           soldier.waypoints.push({ x: worldPos.x, z: worldPos.z });
@@ -459,9 +472,21 @@ export class Game {
     switch (cmd.type) {
       case CommandType.MOVE:
       case CommandType.RUSH:
-        if (cmd.targetPosition) {
-          /* Set the soldier's waypoint to the target position */
-          soldier.waypoints = [cmd.targetPosition];
+        if (cmd.targetPosition && this.movementSystem) {
+          /* Use A* pathfinding to find a wall-avoiding path */
+          const rawPath = this.movementSystem.findPath(
+            soldier.position,
+            cmd.targetPosition
+          );
+          if (rawPath.length > 0) {
+            /* Smooth the path to remove unnecessary zigzag */
+            const smoothed = this.movementSystem.smoothPath(rawPath);
+            /* Convert Vec2 (readonly) to mutable Position objects for waypoints */
+            soldier.waypoints = smoothed.map(p => ({ x: p.x, z: p.z }));
+          } else {
+            /* No path found — fall back to direct movement */
+            soldier.waypoints = [{ ...cmd.targetPosition }];
+          }
         }
         break;
 
@@ -708,6 +733,9 @@ export class Game {
 
     updateTeam(this.state.player1Soldiers, 'p1');
     updateTeam(this.state.player2Soldiers, 'p2');
+
+    /* Update the HUD overlay with current game state */
+    this.hud.update(this.state, this.localPlayer, this.selectedSoldier);
   }
 
   // ============================================================

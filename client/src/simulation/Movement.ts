@@ -17,7 +17,6 @@ import type { Vec2 } from "@shared/util/MathUtils";
 import type { MapData, Wall } from "@shared/types/MapTypes";
 import { distance, angleBetween, lineIntersectsRect } from "@shared/util/MathUtils";
 import { MAP } from "@shared/constants/GameConstants";
-import type { ClientSoldier } from "./Soldier";
 
 // ============================================================================
 // --- Constants ---
@@ -28,7 +27,7 @@ import type { ClientSoldier } from "./Soldier";
  * When a soldier is within this many game units of a waypoint,
  * they are considered to have "arrived" and advance to the next one.
  */
-const WAYPOINT_ARRIVAL_DISTANCE = 5;
+export const WAYPOINT_ARRIVAL_DISTANCE = 5;
 
 /**
  * Cost of moving diagonally (sqrt(2) approx 1.414).
@@ -67,9 +66,14 @@ interface AStarNode {
  * One instance is created per map and reused for all pathfinding queries.
  *
  * @example
- * 
+ * ```ts
+ * const movement = new MovementSystem(mapData);
+ * const path = movement.findPath({ x: 100, z: 100 }, { x: 500, z: 300 });
+ * const smooth = movement.smoothPath(path);
+ * ```
  */
-export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blocked by wall */
+export class MovementSystem {
+  /** 2D boolean grid: true = walkable, false = blocked by wall */
   private navGrid: boolean[][];
 
   /** Number of columns in the navigation grid */
@@ -97,8 +101,8 @@ export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blo
   constructor(mapData: MapData) {
     this.cellSize = MAP.cellSize;
     this.walls = mapData.walls;
-    this.cols = Math.ceil(mapData.width / this.cellSize);
-    this.rows = Math.ceil(mapData.height / this.cellSize);
+    this.cols = Math.ceil(mapData.dimensions.width / this.cellSize);
+    this.rows = Math.ceil(mapData.dimensions.height / this.cellSize);
     this.navGrid = this.generateNavGrid(mapData);
   }
 
@@ -164,6 +168,7 @@ export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blo
 
     return grid;
   }
+
   // --------------------------------------------------------------------------
   // A* Pathfinding
   // --------------------------------------------------------------------------
@@ -249,6 +254,7 @@ export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blo
     /* Add start node to open set with f = 0 + heuristic */
     const startH = heuristic(startGrid.col, startGrid.row);
     openSet.push({ col: startGrid.col, row: startGrid.row, f: startH });
+
     /**
      * 8-directional neighbors: cardinal + diagonal.
      * Each entry: [deltaCol, deltaRow, movementCost]
@@ -321,7 +327,7 @@ export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blo
 
           /**
            * Insert into the sorted open set at the correct position.
-           * We use binary search-like insertion to maintain sort order.
+           * We use linear search insertion to maintain sort order.
            */
           let inserted = false;
           for (let i = 0; i < openSet.length; i++) {
@@ -341,6 +347,7 @@ export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blo
     /* Step 4: Open set is empty and goal was never reached - no path exists */
     return [];
   }
+
   /**
    * Reconstruct the path from the cameFrom map after A* reaches the goal.
    * Follows parent pointers from goal back to start, then reverses.
@@ -439,15 +446,19 @@ export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blo
    */
   private hasLOS(from: Vec2, to: Vec2): boolean {
     for (const wall of this.walls) {
-      if (lineIntersectsRect(
-        from.x, from.z, to.x, to.z,
-        wall.x, wall.z, wall.width, wall.height
-      )) {
+      /* lineIntersectsRect takes two Vec2 points and a rectangle object */
+      if (lineIntersectsRect(from, to, {
+        x: wall.x,
+        z: wall.z,
+        width: wall.width,
+        height: wall.height,
+      })) {
         return false; /* Wall blocks the line */
       }
     }
     return true; /* No walls in the way */
   }
+
   // --------------------------------------------------------------------------
   // Grid Utility Methods
   // --------------------------------------------------------------------------
@@ -504,91 +515,4 @@ export class MovementSystem {  /** 2D boolean grid: true = walkable, false = blo
   private isGridCellValid(col: number, row: number): boolean {
     return col >= 0 && col < this.cols && row >= 0 && row < this.rows;
   }
-}
-
-// ============================================================================
-// --- Soldier Movement Function ---
-// ============================================================================
-
-/**
- * Move a soldier toward their current waypoint at their calculated speed.
- * This function is called once per simulation tick for each moving soldier.
- *
- * Movement logic:
- * 1. If the soldier has no waypoints, stop moving.
- * 2. Get the current (first) waypoint from the queue.
- * 3. Calculate the direction vector from soldier to waypoint.
- * 4. Move the soldier toward the waypoint at speed * deltaTime.
- * 5. If soldier arrives within WAYPOINT_ARRIVAL_DISTANCE, advance to next waypoint.
- * 6. Update the soldiers rotation to face movement direction.
- * 7. Set isMoving flag accordingly.
- *
- * @param soldier - The soldier to move
- * @param deltaTime - Time elapsed since last tick in seconds
- */
-export function moveSoldier(soldier: ClientSoldier, deltaTime: number): void {
-  /* If the soldier is dead, do not move */
-  if (!soldier.isAlive()) {
-    soldier.isMoving = false;
-    return;
-  }
-
-  /* Get the current target waypoint */
-  const waypoint = soldier.getCurrentWaypoint();
-
-  /* If no waypoints remain, the soldier stops */
-  if (waypoint === null) {
-    soldier.isMoving = false;
-    return;
-  }
-
-  /* Calculate distance to the current waypoint */
-  const dist = distance(soldier.position, waypoint);
-
-  /* Check if we have arrived at the waypoint */
-  if (dist <= WAYPOINT_ARRIVAL_DISTANCE) {
-    /* Snap to waypoint position and advance to the next one */
-    soldier.position.x = waypoint.x;
-    soldier.position.z = waypoint.z;
-    soldier.advanceWaypoint();
-
-    /* Check if there are more waypoints; if not, stop */
-    if (!soldier.hasWaypoints()) {
-      soldier.isMoving = false;
-      return;
-    }
-  }
-
-  /* Calculate movement direction (unit vector toward waypoint) */
-  const dx = waypoint.x - soldier.position.x;
-  const dz = waypoint.z - soldier.position.z;
-  const magnitude = Math.sqrt(dx * dx + dz * dz);
-
-  /* Safety check: avoid division by zero if somehow exactly at waypoint */
-  if (magnitude === 0) return;
-
-  const dirX = dx / magnitude;
-  const dirZ = dz / magnitude;
-
-  /* Calculate movement distance for this tick */
-  const speed = soldier.getSpeed();
-  const moveDistance = speed * deltaTime;
-
-  /**
-   * Move the soldier. If the movement distance exceeds the remaining
-   * distance to the waypoint, clamp to the waypoint position.
-   */
-  if (moveDistance >= magnitude) {
-    soldier.position.x = waypoint.x;
-    soldier.position.z = waypoint.z;
-  } else {
-    soldier.position.x += dirX * moveDistance;
-    soldier.position.z += dirZ * moveDistance;
-  }
-
-  /* Update the soldiers rotation to face the direction of movement */
-  soldier.rotation = angleBetween(soldier.position, waypoint);
-
-  /* Soldier is actively moving */
-  soldier.isMoving = true;
 }
