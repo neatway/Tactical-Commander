@@ -33,6 +33,7 @@ import { EconomyManager } from '../simulation/EconomyManager';
 import type { EconomyUpdate } from '../simulation/EconomyManager';
 import { HUD } from '../ui/HUD';
 import { BuyMenu } from '../ui/BuyMenu';
+import { RoundSummary } from '../ui/RoundSummary';
 import { BotAI } from './BotAI';
 import {
   GamePhase,
@@ -134,6 +135,8 @@ export class Game {
   private hud: HUD;
   /** Buy menu UI overlay for purchasing equipment */
   private buyMenu: BuyMenu;
+  /** Round summary screen shown during ROUND_END phase */
+  private roundSummary: RoundSummary;
   /** Utility system managing active smokes, flashes, frags, molotovs, decoys */
   private utilitySystem: UtilitySystem;
   /** Economy manager — calculates kill rewards, round rewards, bomb bonuses */
@@ -225,6 +228,9 @@ export class Game {
 
     /* Initialize the buy menu (hidden by default, shown during BUY_PHASE) */
     this.buyMenu = new BuyMenu('buy-menu');
+
+    /* Initialize the round summary screen (hidden by default, shown during ROUND_END) */
+    this.roundSummary = new RoundSummary('round-summary');
 
     /* Initialize the utility system (manages active smokes, flashes, etc.) */
     this.utilitySystem = new UtilitySystem();
@@ -1916,6 +1922,9 @@ export class Game {
     /* Store the economy update for the round summary screen */
     this.lastRoundEconomyUpdate = economyUpdate;
 
+    /* Save the round kills before clearing (needed for summary screen) */
+    const roundKills = [...this.state.currentRoundKills];
+
     /* Save the round result to history */
     this.state.roundHistory.push({
       roundNumber: this.state.roundNumber,
@@ -1923,7 +1932,7 @@ export class Game {
       bombPlanted: this.state.bombPlanted,
       bombDefused: this.state.bombDefused,
       bombDetonated: this.state.phase === GamePhase.POST_PLANT,
-      kills: [...this.state.currentRoundKills],
+      kills: roundKills,
     });
 
     /* Clear current round kills */
@@ -1950,6 +1959,28 @@ export class Game {
       ` obj: $${economyUpdate.player2.objectiveBonus})`
     );
 
+    /**
+     * Show the round summary screen with kill feed, MVP, and economy.
+     * The local player's economy details are shown in detail, enemy's is summarized.
+     */
+    const localSide = this.localPlayer === 1
+      ? this.state.player1Side
+      : (this.state.player1Side === Side.ATTACKER ? Side.DEFENDER : Side.ATTACKER);
+    const localEcon = this.localPlayer === 1 ? economyUpdate.player1 : economyUpdate.player2;
+    const enemyEcon = this.localPlayer === 1 ? economyUpdate.player2 : economyUpdate.player1;
+
+    this.roundSummary.show(
+      winner,
+      this.state.roundNumber,
+      this.state.score,
+      roundKills,
+      localSide,
+      localEcon,
+      enemyEcon,
+      this.state.bombPlanted,
+      this.state.bombDefused,
+    );
+
     /* Check for match end */
     if (this.state.score.player1 >= 5 || this.state.score.player2 >= 5) {
       this.state.phase = GamePhase.MATCH_END;
@@ -1966,6 +1997,9 @@ export class Game {
    * handle side swap at the halfway point.
    */
   private startNextRound(): void {
+    /* Hide the round summary screen from the previous round */
+    this.roundSummary.hide();
+
     this.state.roundNumber++;
 
     /* Side swap at round 5 (after 4 rounds per side) */
