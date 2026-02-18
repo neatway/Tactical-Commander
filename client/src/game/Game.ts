@@ -29,6 +29,8 @@ import { MovementSystem } from '../simulation/Movement';
 import { DetectionSystem } from '../simulation/Detection';
 import { UtilitySystem } from '../simulation/Utility';
 import { BombLogic } from '../simulation/BombLogic';
+import { EconomyManager } from '../simulation/EconomyManager';
+import type { EconomyUpdate } from '../simulation/EconomyManager';
 import { HUD } from '../ui/HUD';
 import { BuyMenu } from '../ui/BuyMenu';
 import { BotAI } from './BotAI';
@@ -134,6 +136,8 @@ export class Game {
   private buyMenu: BuyMenu;
   /** Utility system managing active smokes, flashes, frags, molotovs, decoys */
   private utilitySystem: UtilitySystem;
+  /** Economy manager — calculates kill rewards, round rewards, bomb bonuses */
+  private economyManager: EconomyManager;
   /** Bomb plant/defuse logic — zone checks, progress tracking */
   private bombLogic: BombLogic | null = null;
   /** Fog of war overlay — texture-based visibility masking */
@@ -152,6 +156,8 @@ export class Game {
   private rng!: SeededRandom;
   /** Map wall data (cached for LOS checks) */
   private walls: Wall[] = [];
+  /** Cached map data (for respawning soldiers between rounds) */
+  private mapData: { spawnZones: { attacker: { x: number; z: number; width: number; height: number }; defender: { x: number; z: number; width: number; height: number } } } | null = null;
 
   // --- Timing ---
   /** Timestamp of the last frame (for delta time calculation) */
@@ -180,6 +186,12 @@ export class Game {
    * Tracked each frame; the simulation tick reads this to progress defusing.
    */
   private isRequestingDefuse: boolean = false;
+  /**
+   * Stores the economy changes from the last completed round.
+   * Used by the round summary screen to display kill rewards, bonuses, etc.
+   * Reset at the start of each new round.
+   */
+  private lastRoundEconomyUpdate: EconomyUpdate | null = null;
 
   /**
    * Initialize all game systems.
@@ -217,6 +229,9 @@ export class Game {
     /* Initialize the utility system (manages active smokes, flashes, etc.) */
     this.utilitySystem = new UtilitySystem();
 
+    /* Initialize the economy manager for round reward calculations */
+    this.economyManager = new EconomyManager();
+
     /* Create initial game state with a random seed */
     this.state = createInitialGameState(Date.now());
 
@@ -244,6 +259,9 @@ export class Game {
 
     /* Cache the wall data for LOS checks */
     this.walls = BAZAAR_MAP.walls;
+
+    /* Cache the full map data for respawning soldiers between rounds */
+    this.mapData = BAZAAR_MAP;
 
     /* Initialize pathfinding on the loaded map */
     this.movementSystem = new MovementSystem(BAZAAR_MAP);
@@ -351,6 +369,46 @@ export class Game {
     }
 
     console.log('[Game] Soldiers spawned: 5 attackers (red), 5 defenders (blue)');
+  }
+
+  /**
+   * Respawn all soldiers at their team's spawn positions for a new round.
+   *
+   * Between rounds, soldiers need to be moved back to spawn zones.
+   * Player 1's side determines which spawn zone each team uses:
+   *   - If P1 is attacker: P1 soldiers → attacker spawn, P2 → defender spawn
+   *   - If P1 is defender: P1 soldiers → defender spawn, P2 → attacker spawn
+   *
+   * This is called at the start of each new round by startNextRound().
+   */
+  private respawnSoldiersAtSpawn(): void {
+    if (!this.mapData) return;
+
+    const attackerSpawn = this.mapData.spawnZones.attacker;
+    const defenderSpawn = this.mapData.spawnZones.defender;
+
+    /** Determine which spawn zone each player gets based on current sides */
+    const p1IsAttacker = this.state.player1Side === Side.ATTACKER;
+    const p1Spawn = p1IsAttacker ? attackerSpawn : defenderSpawn;
+    const p2Spawn = p1IsAttacker ? defenderSpawn : attackerSpawn;
+
+    /* Respawn player 1's soldiers */
+    for (let i = 0; i < this.state.player1Soldiers.length; i++) {
+      const soldier = this.state.player1Soldiers[i];
+      soldier.position.x = p1Spawn.x + p1Spawn.width * 0.2 + (p1Spawn.width * 0.6 * (i / 4));
+      soldier.position.z = p1Spawn.z + p1Spawn.height / 2;
+      /* Attackers face right (0 rad), defenders face left (PI rad) */
+      soldier.rotation = p1IsAttacker ? 0 : Math.PI;
+    }
+
+    /* Respawn player 2's soldiers */
+    for (let i = 0; i < this.state.player2Soldiers.length; i++) {
+      const soldier = this.state.player2Soldiers[i];
+      soldier.position.x = p2Spawn.x + p2Spawn.width * 0.2 + (p2Spawn.width * 0.6 * (i / 4));
+      soldier.position.z = p2Spawn.z + p2Spawn.height / 2;
+      /* Player 2 is the opposite side of player 1 */
+      soldier.rotation = p1IsAttacker ? Math.PI : 0;
+    }
   }
 
   // ============================================================
@@ -1817,12 +1875,15 @@ export class Game {
 
   /**
    * End the current round with a winner.
-   * Awards money, updates score, transitions to ROUND_END phase.
+   * Uses the EconomyManager to calculate proper rewards including:
+   *   - Win/loss streak round rewards
+   *   - Per-kill weapon rewards
+   *   - Bomb plant/defuse objective bonuses
+   * Updates score, economy, and transitions to ROUND_END phase.
    */
   private endRound(winner: Side): void {
     /* Determine which player won based on current sides */
-    const player1Won =
-      (this.state.player1Side === winner);
+    const player1Won = (this.state.player1Side === winner);
 
     /* Update score */
     if (player1Won) {
@@ -1831,16 +1892,29 @@ export class Game {
       this.state.score.player2++;
     }
 
-    /* Award round money */
-    /* TODO: Full economy calculation using EconomyConstants */
-    const winnerEcon = player1Won ? this.state.player1Economy : this.state.player2Economy;
-    const loserEcon = player1Won ? this.state.player2Economy : this.state.player1Economy;
-    winnerEcon.money = Math.min(16000, winnerEcon.money + 3250);
-    winnerEcon.lossStreak = 0;
-    loserEcon.lossStreak++;
-    const lossRewards = [1400, 1900, 2400, 2900];
-    const lossReward = lossRewards[Math.min(loserEcon.lossStreak - 1, 3)];
-    loserEcon.money = Math.min(16000, loserEcon.money + lossReward);
+    /**
+     * Calculate full economy rewards using the EconomyManager.
+     * This handles win/loss rewards, kill rewards by weapon, and bomb bonuses.
+     */
+    const economyUpdate = this.economyManager.calculateRoundRewards(
+      winner,
+      this.state.player1Side,
+      this.state.player1Economy,
+      this.state.player2Economy,
+      this.state.currentRoundKills,
+      this.state.bombPlanted,
+      this.state.bombDefused
+    );
+
+    /* Apply the economy changes to both players */
+    this.economyManager.applyUpdate(
+      this.state.player1Economy,
+      this.state.player2Economy,
+      economyUpdate
+    );
+
+    /* Store the economy update for the round summary screen */
+    this.lastRoundEconomyUpdate = economyUpdate;
 
     /* Save the round result to history */
     this.state.roundHistory.push({
@@ -1859,13 +1933,31 @@ export class Game {
     this.state.phase = GamePhase.ROUND_END;
     this.state.timeRemaining = PHASE_DURATIONS[GamePhase.ROUND_END];
 
-    console.log(`[Round] Round ${this.state.roundNumber} won by ${winner}. Score: ${this.state.score.player1}-${this.state.score.player2}`);
+    console.log(
+      `[Round] Round ${this.state.roundNumber} won by ${winner}.` +
+      ` Score: ${this.state.score.player1}-${this.state.score.player2}`
+    );
+
+    /* Log economy details */
+    console.log(
+      `[Economy] P1: +$${economyUpdate.player1.totalEarned}` +
+      ` (round: $${economyUpdate.player1.roundReward}` +
+      ` kills: $${economyUpdate.player1.killRewards}` +
+      ` obj: $${economyUpdate.player1.objectiveBonus})` +
+      ` | P2: +$${economyUpdate.player2.totalEarned}` +
+      ` (round: $${economyUpdate.player2.roundReward}` +
+      ` kills: $${economyUpdate.player2.killRewards}` +
+      ` obj: $${economyUpdate.player2.objectiveBonus})`
+    );
 
     /* Check for match end */
     if (this.state.score.player1 >= 5 || this.state.score.player2 >= 5) {
       this.state.phase = GamePhase.MATCH_END;
       const matchWinner = this.state.score.player1 >= 5 ? 'Player 1' : 'Player 2';
-      console.log(`[Match] MATCH OVER! ${matchWinner} wins ${this.state.score.player1}-${this.state.score.player2}`);
+      console.log(
+        `[Match] MATCH OVER! ${matchWinner} wins` +
+        ` ${this.state.score.player1}-${this.state.score.player2}`
+      );
     }
   }
 
@@ -1883,12 +1975,13 @@ export class Game {
       console.log(`[Match] Side swap! Player 1 is now ${this.state.player1Side}`);
     }
 
-    /* Round 9 tiebreaker */
+    /* Round 9 tiebreaker — use EconomyManager for overtime money */
     if (this.state.roundNumber === 9 && this.state.score.player1 === 4 && this.state.score.player2 === 4) {
-      /* Both teams get $10,000 for the final round */
-      this.state.player1Economy.money = 10000;
-      this.state.player2Economy.money = 10000;
-      console.log('[Match] TIEBREAKER ROUND! Both teams receive $10,000');
+      this.economyManager.applyOvertimeMoney(
+        this.state.player1Economy,
+        this.state.player2Economy
+      );
+      console.log('[Match] TIEBREAKER ROUND! Both teams receive overtime money');
     }
 
     /* Reset round state */
@@ -1900,8 +1993,33 @@ export class Game {
     this.state.currentRoundKills = [];
     this.commandSystem.clearAll();
 
-    /* Reset soldiers to alive with full health (keep stats and equipment) */
+    /**
+     * Reset soldiers for the new round with equipment persistence.
+     *
+     * Equipment persistence rules:
+     *   - Surviving soldiers keep their weapon, armor, helmet, defuse kit
+     *   - Dead soldiers lose all equipment → reset to pistol, no armor
+     *   - All soldiers are revived to full health at spawn positions
+     *   - Utility is consumed when used, so survivors keep unspent utility
+     *   - On side swap (round 5), ALL equipment resets (fresh economy)
+     */
+    const isSideSwapRound = this.state.roundNumber === 5;
+
     for (const soldier of [...this.state.player1Soldiers, ...this.state.player2Soldiers]) {
+      /**
+       * If the soldier died this round OR it's a side swap round,
+       * strip all equipment back to default pistol loadout.
+       */
+      if (!soldier.alive || isSideSwapRound) {
+        soldier.currentWeapon = WeaponId.PISTOL;
+        soldier.armor = null;
+        soldier.helmet = false;
+        soldier.utility = [];
+        soldier.defuseKit = false;
+      }
+      /* Surviving soldiers keep their equipment (weapon, armor, helmet, utility, kit) */
+
+      /* Reset round-specific state for all soldiers */
       soldier.health = 100;
       soldier.alive = true;
       soldier.isMoving = false;
@@ -1915,6 +2033,22 @@ export class Game {
       soldier.shotsFired = 0;
       soldier.isBlinded = false;
       soldier.blindedTimer = 0;
+      soldier.hasBomb = false;
+    }
+
+    /* Re-spawn soldiers at spawn positions for the new round */
+    this.respawnSoldiersAtSpawn();
+
+    /**
+     * Assign the bomb to the first attacker soldier (index 0).
+     * The bomb carrier must be on the attacking team.
+     */
+    const p1IsAttacker = this.state.player1Side === Side.ATTACKER;
+    const attackerSoldiers = p1IsAttacker
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+    if (attackerSoldiers.length > 0) {
+      attackerSoldiers[0].hasBomb = true;
     }
 
     /* Clear all active utility effects from the previous round */
@@ -2061,6 +2195,15 @@ export class Game {
    */
   getState(): GameState {
     return this.state;
+  }
+
+  /**
+   * Get the economy changes from the last completed round.
+   * Used by the round summary screen to display kill rewards, bonuses, etc.
+   * Returns null if no round has been completed yet.
+   */
+  getLastRoundEconomyUpdate(): EconomyUpdate | null {
+    return this.lastRoundEconomyUpdate;
   }
 
   /**
