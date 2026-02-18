@@ -47,6 +47,7 @@ import {
   calculateTeamworkModifier,
 } from '../../../shared/constants/StatFormulas.js';
 import { TIMING } from '../../../shared/constants/GameConstants.js';
+import { ServerPathfinding } from './ServerPathfinding.js';
 
 // ============================================================================
 // --- Types ---
@@ -277,8 +278,20 @@ export class ServerSimulation {
   /** Whether the bomb was defused this round */
   private bombDefused: boolean = false;
 
+  /** Events generated during the current tick (reset each tick) */
+  private tickEvents: SimEvent[] = [];
+
   /** Wall data for LOS checks (loaded from map) */
   private walls: Array<{ x: number; z: number; width: number; height: number }> = [];
+
+  /** A* pathfinding system for wall-aware movement (null until walls are set) */
+  private pathfinder: ServerPathfinding | null = null;
+
+  /** Map width in game units (set when walls are loaded) */
+  private mapWidth: number = 3000;
+
+  /** Map height in game units (set when walls are loaded) */
+  private mapHeight: number = 2000;
 
   /**
    * Create a new server simulation.
@@ -388,13 +401,27 @@ export class ServerSimulation {
   }
 
   /**
-   * Set the wall data for LOS checks.
+   * Set the wall data for LOS checks and initialize pathfinding.
    * Called once when the map is loaded.
    *
    * @param walls - Array of wall rectangles
+   * @param mapWidth - Map width in game units (default 3000)
+   * @param mapHeight - Map height in game units (default 2000)
    */
-  setWalls(walls: Array<{ x: number; z: number; width: number; height: number }>): void {
+  setWalls(
+    walls: Array<{ x: number; z: number; width: number; height: number }>,
+    mapWidth: number = 3000,
+    mapHeight: number = 2000
+  ): void {
     this.walls = walls;
+    this.mapWidth = mapWidth;
+    this.mapHeight = mapHeight;
+
+    /**
+     * Create the A* pathfinding system from the wall data.
+     * This generates a navigation grid (60x40 for a 3000x2000 map with 50px cells).
+     */
+    this.pathfinder = new ServerPathfinding(mapWidth, mapHeight, walls);
   }
 
   // --------------------------------------------------------------------------
@@ -445,7 +472,8 @@ export class ServerSimulation {
     this.tick++;
     this.gameTime += TICK_RATE_MS / 1000;
 
-    const events: SimEvent[] = [];
+    /** Accumulates events generated during this tick */
+    this.tickEvents = [];
     const kills: KillRecord[] = [];
 
     /* Step 1: Process commands that have passed their delay */
@@ -457,7 +485,7 @@ export class ServerSimulation {
     /* Step 3: Update detection */
     this.updateDetection();
 
-    /* Step 4: Resolve combat */
+    /* Step 4: Resolve combat (generates SHOT_FIRED, HIT, KILL events) */
     const combatKills = this.updateCombat();
     kills.push(...combatKills);
     this.roundKills.push(...combatKills);
@@ -465,14 +493,14 @@ export class ServerSimulation {
     /* Step 5: Update blind timers (flash grenade effect) */
     this.updateBlindTimers();
 
-    /* Step 6: Update bomb actions */
+    /* Step 6: Update bomb actions (may generate BOMB_PLANTED, BOMB_DEFUSED, BOMB_EXPLODED) */
     this.updateBombActions();
 
     /* Step 7: Check round-end conditions */
     const roundEnd = this.checkRoundEnd();
 
     return {
-      events,
+      events: this.tickEvents,
       roundEnded: roundEnd.ended,
       winningSide: roundEnd.winner,
       kills,
@@ -507,6 +535,7 @@ export class ServerSimulation {
 
   /**
    * Execute a single command. Updates the target soldier's state.
+   * Uses A* pathfinding for movement commands to navigate around walls.
    */
   private executeCommand(cmd: QueuedCommand): void {
     const soldiers = cmd.playerNumber === 1 ? this.player1Soldiers : this.player2Soldiers;
@@ -518,11 +547,23 @@ export class ServerSimulation {
       case 'RUSH':
         if (cmd.targetPosition) {
           /**
-           * Simplified pathfinding for server.
-           * TODO: Integrate A* from MovementSystem for wall avoidance.
-           * For now, uses direct movement (no wall clipping prevention).
+           * Use A* pathfinding to find a wall-aware path from the soldier's
+           * current position to the target. Falls back to direct movement
+           * if pathfinding is unavailable or returns no path.
            */
-          soldier.waypoints = [{ ...cmd.targetPosition }];
+          if (this.pathfinder) {
+            const path = this.pathfinder.findPath(soldier.position, cmd.targetPosition);
+            if (path.length > 1) {
+              /* Skip the first waypoint (it's the current position) */
+              soldier.waypoints = path.slice(1);
+            } else {
+              /* No valid path found — try direct movement as fallback */
+              soldier.waypoints = [{ ...cmd.targetPosition }];
+            }
+          } else {
+            /* Pathfinder not initialized — direct movement */
+            soldier.waypoints = [{ ...cmd.targetPosition }];
+          }
         }
         break;
 
@@ -535,6 +576,54 @@ export class ServerSimulation {
         soldier.waypoints = [];
         soldier.isMoving = false;
         break;
+
+      case 'PLANT_BOMB':
+        if (soldier.hasBomb && !this.bombPlanted) {
+          soldier.isPlanting = true;
+          soldier.actionProgress = 0;
+          soldier.waypoints = [];
+          soldier.isMoving = false;
+        }
+        break;
+
+      case 'DEFUSE_BOMB':
+        if (this.bombPlanted && !this.bombDefused) {
+          soldier.isDefusing = true;
+          soldier.actionProgress = 0;
+          soldier.waypoints = [];
+          soldier.isMoving = false;
+        }
+        break;
+
+      case 'REGROUP': {
+        /**
+         * Find the nearest alive ally and move toward them.
+         * Useful for consolidating forces before a push.
+         */
+        let nearestAlly: Position | null = null;
+        let nearestDist = Infinity;
+        for (const ally of soldiers) {
+          if (ally.soldierId === soldier.soldierId || !ally.alive) continue;
+          const d = this.distance(soldier.position, ally.position);
+          if (d < nearestDist) {
+            nearestDist = d;
+            nearestAlly = { ...ally.position };
+          }
+        }
+        if (nearestAlly) {
+          if (this.pathfinder) {
+            const path = this.pathfinder.findPath(soldier.position, nearestAlly);
+            if (path.length > 1) {
+              soldier.waypoints = path.slice(1);
+            } else {
+              soldier.waypoints = [nearestAlly];
+            }
+          } else {
+            soldier.waypoints = [nearestAlly];
+          }
+        }
+        break;
+      }
     }
   }
 
@@ -902,6 +991,25 @@ export class ServerSimulation {
     /* Clamp */
     hitChance = Math.max(0.02, Math.min(0.98, hitChance));
 
+    /**
+     * Generate SHOT_FIRED event for rendering muzzle flash and sound.
+     * This fires even if the shot misses.
+     */
+    this.tickEvents.push({
+      type: 'SHOT_FIRED',
+      tick: this.tick,
+      data: {
+        shooterId: shooter.soldierId,
+        weaponId: shooter.currentWeapon,
+        originX: shooter.position.x,
+        originZ: shooter.position.z,
+        directionRad: Math.atan2(
+          target.position.z - shooter.position.z,
+          target.position.x - shooter.position.x
+        ),
+      },
+    });
+
     /* Roll hit/miss */
     if (this.rng.next() >= hitChance) return null;
 
@@ -942,6 +1050,19 @@ export class ServerSimulation {
     /* Apply damage */
     target.health -= damage;
 
+    /** Generate HIT event for rendering hit markers */
+    this.tickEvents.push({
+      type: 'HIT',
+      tick: this.tick,
+      data: {
+        shooterId: shooter.soldierId,
+        victimId: target.soldierId,
+        damage,
+        hitLocation,
+        isHeadshot: hitLocation === 'head',
+      },
+    });
+
     /* Interrupt plant/defuse on hit */
     if (target.isPlanting || target.isDefusing) {
       target.isPlanting = false;
@@ -958,6 +1079,18 @@ export class ServerSimulation {
       target.currentTarget = null;
       target.waypoints = [];
       target.detectedEnemies = [];
+
+      /** Generate KILL event for kill feed */
+      this.tickEvents.push({
+        type: 'KILL',
+        tick: this.tick,
+        data: {
+          killerId: shooter.soldierId,
+          victimId: target.soldierId,
+          weaponId: shooter.currentWeapon,
+          headshot: hitLocation === 'head',
+        },
+      });
 
       return {
         killerId: shooter.soldierId,
@@ -1014,8 +1147,25 @@ export class ServerSimulation {
           soldier.hasBomb = false;
           this.bombPlanted = true;
           this.bombPosition = { ...soldier.position };
-          this.bombSite = 'A'; // TODO: determine which site based on position
+
+          /**
+           * Determine which bomb site based on soldier position.
+           * Site A is in the upper half (z < 1000), Site B in the lower half.
+           */
+          this.bombSite = soldier.position.z < 1000 ? 'A' : 'B';
           this.bombTimer = TIMING?.postPlantSeconds ?? 40;
+
+          /** Generate BOMB_PLANTED event */
+          this.tickEvents.push({
+            type: 'BOMB_PLANTED',
+            tick: this.tick,
+            data: {
+              planterId: soldier.soldierId,
+              siteId: this.bombSite,
+              x: soldier.position.x,
+              z: soldier.position.z,
+            },
+          });
         }
       }
 
@@ -1029,6 +1179,16 @@ export class ServerSimulation {
           soldier.isDefusing = false;
           soldier.actionProgress = 0;
           this.bombDefused = true;
+
+          /** Generate BOMB_DEFUSED event */
+          this.tickEvents.push({
+            type: 'BOMB_DEFUSED',
+            tick: this.tick,
+            data: {
+              defuserId: soldier.soldierId,
+              hadKit: soldier.defuseKit,
+            },
+          });
         }
       }
     }
@@ -1036,6 +1196,18 @@ export class ServerSimulation {
     /* Tick bomb timer when planted */
     if (this.bombPlanted && !this.bombDefused) {
       this.bombTimer -= dt;
+
+      /* Bomb exploded — generate event */
+      if (this.bombTimer <= 0) {
+        this.tickEvents.push({
+          type: 'BOMB_EXPLODED',
+          tick: this.tick,
+          data: {
+            x: this.bombPosition?.x ?? 0,
+            z: this.bombPosition?.z ?? 0,
+          },
+        });
+      }
     }
   }
 
