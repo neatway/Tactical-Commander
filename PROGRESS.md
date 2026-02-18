@@ -8,13 +8,13 @@
 
 | Milestone | Description | Progress |
 |-----------|-------------|----------|
-| **M1** | Core Prototype (playable in browser) | ~35% |
+| **M1** | Core Prototype (playable in browser) | ~45% |
 | **M2** | Full Round Loop + Economy | ~10% |
 | **M3** | Online Multiplayer | ~5% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
 | **M5** | Polish & Balance (ranks, maps, audio, replays) | 0% |
 
-**Overall: ~15%** — Code exists but hasn't been integrated or tested yet.
+**Overall: ~18%** — Core rendering pipeline integrated and running in browser.
 
 ---
 
@@ -46,9 +46,9 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 - [ ] **Combat system** — Full engagement resolution with all 10 stat modifiers (in Combat.ts)
 - [ ] **ClientSoldier class** — Wraps stats + state, delegates to StatFormulas (in Soldier.ts)
 
-### Not Started
+### In Progress
 
-- [ ] **Integration pass** — Fix imports, reconcile types, wire simulation into game loop
+- [x] **Integration pass** — Fixed imports, reconciled types, core rendering compiles and runs
 - [ ] **Fog of war** — Texture-based visibility masking
 - [ ] **Basic AI opponent** — Simple bot that buys/moves/shoots for single-player testing
 - [ ] **Utility system** — Smoke (blocks vision), flash (blinds), frag (area damage), molotov (area denial), decoy (fake sounds)
@@ -56,11 +56,12 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 
 ### Known Issues To Fix
 
-- [ ] WeaponData.ts uses old field names (`bodyDmg`, `headMult`) but WeaponTypes.ts expects (`bodyDamage`, `headshotMultiplier`)
-- [ ] Duplicate StatFormulas.ts exists in both `shared/constants/` and `shared/formulas/`
-- [ ] Client GameState.ts defines its own GamePhase/Side/Stance enums that duplicate shared types
-- [ ] Import paths are inconsistent across agent-written files (some relative, some @shared aliases)
-- [ ] `npm install` hasn't been run yet — nothing compiles
+- [x] ~~WeaponData.ts uses old field names~~ — Already correct (`bodyDamage`, `headshotMultiplier`)
+- [x] ~~Duplicate StatFormulas.ts~~ — Only `shared/constants/StatFormulas.ts` exists (no duplicate)
+- [x] ~~Client GameState.ts defines its own enums~~ — Now imports/re-exports from shared types
+- [x] ~~Import paths inconsistent~~ — All now use `@shared/` aliases
+- [x] ~~npm install hasn't been run~~ — Dependencies installed, Vite serves the game
+- [ ] Simulation files (Soldier.ts, Movement.ts, Detection.ts, Combat.ts) have type mismatches with shared interfaces — will fix during wiring tasks
 
 ---
 
@@ -221,10 +222,10 @@ client/src/ui/HUD.ts  — HTML/CSS overlay (score, phase, timer, money, alive co
 client/src/main.ts    — Boot sequence, creates Game instance
 ```
 
-### Duplicates To Clean Up
+### Duplicates (Resolved)
 ```
-shared/formulas/StatFormulas.ts  — DUPLICATE of shared/constants/StatFormulas.ts (delete this one)
-shared/util/SeededRandom.ts      — May duplicate SeededRandom class in RandomUtils.ts (check and merge)
+shared/formulas/StatFormulas.ts  — Does not exist (was never created)
+shared/util/SeededRandom.ts      — Does not exist (SeededRandom is in RandomUtils.ts)
 ```
 
 **Total: ~28 unique source files, ~8,000+ lines of TypeScript**
@@ -247,8 +248,8 @@ shared/util/SeededRandom.ts      — May duplicate SeededRandom class in RandomU
 
 ## Next Steps (In Order)
 
-1. **Integration pass** — Fix all type mismatches, imports, duplicates, get it compiling
-2. **npm run dev** — See the game in the browser for the first time
+1. ~~**Integration pass**~~ — DONE. Core game renders in browser via `npm run dev`.
+2. ~~**npm run dev**~~ — DONE. Vite serves the game on port 3000.
 3. **Wire in pathfinding** — Replace simple movement with A* from Movement.ts
 4. **Wire in detection** — Soldiers spot enemies using vision cones + LOS
 5. **Wire in combat** — Stat-driven firefights when soldiers detect each other

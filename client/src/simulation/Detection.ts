@@ -6,9 +6,9 @@
  * one soldier spots another on any given tick.
  *
  * Detection Pipeline (per tick):
- * 1. Range check: Is the target within the observers detection radius?
- *    (Modified by targets stealth stat)
- * 2. Vision cone: Is the target within the observers field of view?
+ * 1. Range check: Is the target within the observer's detection radius?
+ *    (Modified by target's stealth stat)
+ * 2. Vision cone: Is the target within the observer's field of view?
  * 3. Line of sight: Is there a clear, unobstructed line to the target?
  * 4. Detection roll: Probabilistic check (per tick) for spotting.
  *    Peripheral vision targets get a penalty to this roll.
@@ -17,7 +17,7 @@
  */
 
 import type { Vec2 } from "@shared/util/MathUtils";
-import type { MapData, Wall } from "@shared/types/MapTypes";
+import type { Wall } from "@shared/types/MapTypes";
 import {
   distance,
   angleBetween,
@@ -30,6 +30,11 @@ import {
 } from "@shared/constants/StatFormulas";
 import { SeededRandom } from "@shared/util/RandomUtils";
 import { SIMULATION } from "@shared/constants/GameConstants";
+import type { SoldierRuntimeState, Position } from "../game/GameState";
+
+// ============================================================================
+// --- Helper: Angle Difference ---
+// ============================================================================
 
 /**
  * Calculate the smallest signed angle difference between two angles.
@@ -43,7 +48,23 @@ function angleDifference(a: number, b: number): number {
   while (diff < -Math.PI) diff += 2 * Math.PI;
   return diff;
 }
-import type { ClientSoldier } from "./Soldier";
+
+// ============================================================================
+// --- Default Stat Values ---
+// ============================================================================
+
+/**
+ * Default awareness stat for soldiers without a full stats profile.
+ * This gives a baseline detection radius of ~400px.
+ * Will be replaced by per-soldier stats when the roster system is wired in.
+ */
+const DEFAULT_AWARENESS = 50;
+
+/**
+ * Default stealth stat for soldiers without a full stats profile.
+ * This gives a baseline stealth modifier of ~1.0 (no reduction).
+ */
+const DEFAULT_STEALTH = 50;
 
 // ============================================================================
 // --- DetectionSystem Class ---
@@ -54,24 +75,24 @@ import type { ClientSoldier } from "./Soldier";
  * Created once per map, reused every tick.
  *
  * @example
- * 
+ * ```ts
+ * const detection = new DetectionSystem(mapData.walls);
+ * const detected = detection.getVisibleEnemies(soldier, enemies, rng);
+ * ```
  */
 export class DetectionSystem {
-  /** Reference to the maps walls for LOS checks */
+  /** Reference to the map's walls for LOS checks */
   private walls: Wall[];
 
-  // --------------------------------------------------------------------------
-  // Constructor
-  // --------------------------------------------------------------------------
-
   /**
-   * Create a DetectionSystem for the given map.
+   * Create a DetectionSystem for the given map walls.
    *
-   * @param mapData - Map data containing walls for LOS tests
+   * @param walls - Array of wall definitions for LOS tests
    */
-  constructor(mapData: MapData) {
-    this.walls = mapData.walls;
+  constructor(walls: Wall[]) {
+    this.walls = walls;
   }
+
   // --------------------------------------------------------------------------
   // Line of Sight
   // --------------------------------------------------------------------------
@@ -79,30 +100,28 @@ export class DetectionSystem {
   /**
    * Check if there is an unobstructed line of sight between two positions.
    *
-   * Casts a ray (line segment) from  to  and tests it against
+   * Casts a ray (line segment) from `from` to `to` and tests it against
    * every wall rectangle. If any wall intersects the line, LOS is blocked.
    *
    * Uses the Liang-Barsky algorithm via lineIntersectsRect from MathUtils.
    *
    * @param from - The observer position
    * @param to - The target position
-   * @param walls - Array of wall rectangles to test against
    * @returns True if no walls block the line between from and to
    */
-  hasLineOfSight(from: Vec2, to: Vec2, walls: Wall[]): boolean {
+  hasLineOfSight(from: Position, to: Position): boolean {
     /**
      * Iterate through every wall and test for intersection.
      * Return false immediately if any wall blocks the line.
      * This is a brute-force approach but is fast enough for ~50 walls.
      */
-    for (const wall of walls) {
-      if (lineIntersectsRect(
-        from.x, from.z,   /* Line segment start */
-        to.x, to.z,       /* Line segment end */
-        wall.x, wall.z,   /* Wall top-left corner */
-        wall.width,        /* Wall X extent */
-        wall.height        /* Wall Z extent */
-      )) {
+    for (const wall of this.walls) {
+      if (lineIntersectsRect(from, to, {
+        x: wall.x,
+        z: wall.z,
+        width: wall.width,
+        height: wall.height,
+      })) {
         return false; /* This wall blocks line of sight */
       }
     }
@@ -116,26 +135,22 @@ export class DetectionSystem {
   // --------------------------------------------------------------------------
 
   /**
-   * Check if a target position is within an observers vision cone.
+   * Check if a target position is within an observer's vision cone.
    *
-   * The vision cone is defined by the observers facing angle and a
+   * The vision cone is defined by the observer's facing angle and a
    * cone width in degrees. A target is "in cone" if the angle from
    * the observer to the target is within facingAngle +/- (coneDegrees/2).
    *
-   * This function correctly handles the wraparound at the 0/2PI boundary
-   * by using the angleDifference utility which returns the shortest
-   * signed angular difference.
-   *
-   * @param origin - The observers position
+   * @param origin - The observer's position
    * @param facingAngle - The direction the observer is facing (radians)
    * @param target - The target position to check
    * @param coneDegrees - Total width of the vision cone in degrees
    * @returns True if the target is within the vision cone
    */
   isInVisionCone(
-    origin: Vec2,
+    origin: Position,
     facingAngle: number,
-    target: Vec2,
+    target: Position,
     coneDegrees: number
   ): boolean {
     /* Calculate the angle from observer to target */
@@ -153,6 +168,7 @@ export class DetectionSystem {
     /* Target is in cone if the absolute angular difference is within half-cone */
     return Math.abs(diff) <= halfConeRad;
   }
+
   // --------------------------------------------------------------------------
   // Full Detection Check
   // --------------------------------------------------------------------------
@@ -163,12 +179,12 @@ export class DetectionSystem {
    * Detection pipeline:
    *
    * Step 1: RANGE CHECK
-   *   Calculate the observers detection radius (from AWR stat).
-   *   Multiply by targets stealth modifier (from STL stat).
+   *   Calculate the observer's detection radius (from awareness stat).
+   *   Multiply by target's stealth modifier (from stealth stat).
    *   If target is beyond this effective radius, detection fails.
    *
    * Step 2: VISION CONE CHECK
-   *   Check if the target is within the observers vision cone.
+   *   Check if the target is within the observer's vision cone.
    *   The cone is SIMULATION.detectionConeDegrees wide (default 120).
    *   Also check extended peripheral zone (+30 degrees on each side).
    *
@@ -182,32 +198,34 @@ export class DetectionSystem {
    *   Peripheral vision penalty: probability * 0.5 if target is at cone edge.
    *   Roll using SeededRandom for determinism.
    *
-   * @param observer - The soldier trying to detect
-   * @param target - The enemy soldier to detect
-   * @param walls - Map walls for LOS checks
+   * @param observer - The soldier trying to detect (needs position, rotation, alive)
+   * @param target - The enemy soldier to detect (needs position, alive)
    * @param rng - Seeded random number generator for detection roll
+   * @param observerAwareness - Observer's AWR stat (1-100), default 50
+   * @param targetStealth - Target's STL stat (1-100), default 50
    * @returns True if the observer detects the target this tick
    */
   checkDetection(
-    observer: ClientSoldier,
-    target: ClientSoldier,
-    walls: Wall[],
-    rng: SeededRandom
+    observer: SoldierRuntimeState,
+    target: SoldierRuntimeState,
+    rng: SeededRandom,
+    observerAwareness: number = DEFAULT_AWARENESS,
+    targetStealth: number = DEFAULT_STEALTH
   ): boolean {
     /* Dead soldiers cannot detect or be detected */
-    if (!observer.isAlive() || !target.isAlive()) {
+    if (!observer.alive || !target.alive) {
       return false;
     }
 
     // --- Step 1: Range check ---
     /**
      * Calculate the effective detection range.
-     * Observer detection radius is based on their AWR stat.
+     * Observer detection radius is based on their awareness stat.
      * Target stealth modifier reduces this effective radius.
      * A stealthy target (low modifier) means the observer needs to be closer.
      */
-    const baseRadius = calculateDetectionRadius(observer.stats.AWR);
-    const stealthMod = calculateStealthModifier(target.stats.STL);
+    const baseRadius = calculateDetectionRadius(observerAwareness);
+    const stealthMod = calculateStealthModifier(targetStealth);
     const effectiveRadius = baseRadius * stealthMod;
 
     /** Calculate actual distance between the two soldiers */
@@ -240,7 +258,7 @@ export class DetectionSystem {
 
     // --- Step 3: Line of sight check ---
     /** Cast a ray and check if any walls block the view */
-    if (!this.hasLineOfSight(observer.position, target.position, walls)) {
+    if (!this.hasLineOfSight(observer.position, target.position)) {
       return false;
     }
 
@@ -267,6 +285,7 @@ export class DetectionSystem {
     const roll = rng.next();
     return roll < detectionProb;
   }
+
   // --------------------------------------------------------------------------
   // Batch Detection
   // --------------------------------------------------------------------------
@@ -280,18 +299,20 @@ export class DetectionSystem {
    *
    * @param soldier - The observing soldier
    * @param enemies - Array of enemy soldiers to check against
-   * @param walls - Map walls for LOS checks
    * @param rng - Seeded random for detection rolls
-   * @returns Array of enemy soldiers detected this tick
+   * @param awareness - Observer's awareness stat (default 50)
+   * @param targetStealth - Default stealth for targets (default 50)
+   * @returns Array of enemy soldier IDs detected this tick
    */
   getVisibleEnemies(
-    soldier: ClientSoldier,
-    enemies: ClientSoldier[],
-    walls: Wall[],
-    rng: SeededRandom
-  ): ClientSoldier[] {
-    /** Array to collect all detected enemies */
-    const detected: ClientSoldier[] = [];
+    soldier: SoldierRuntimeState,
+    enemies: SoldierRuntimeState[],
+    rng: SeededRandom,
+    awareness: number = DEFAULT_AWARENESS,
+    targetStealth: number = DEFAULT_STEALTH
+  ): string[] {
+    /** Array to collect all detected enemy soldier IDs */
+    const detected: string[] = [];
 
     /**
      * Check each enemy through the detection pipeline.
@@ -299,11 +320,11 @@ export class DetectionSystem {
      */
     for (const enemy of enemies) {
       /* Skip dead enemies early for performance */
-      if (!enemy.isAlive()) continue;
+      if (!enemy.alive) continue;
 
       /* Run the full detection check */
-      if (this.checkDetection(soldier, enemy, walls, rng)) {
-        detected.push(enemy);
+      if (this.checkDetection(soldier, enemy, rng, awareness, targetStealth)) {
+        detected.push(enemy.soldierId);
       }
     }
 
