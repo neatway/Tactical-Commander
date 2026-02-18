@@ -236,9 +236,10 @@ while true; do
     HEARTBEAT_PID=$!
 
     # Run Claude — let it work until it exits on its own
+    # Write output directly to log (no tee pipe — prevents hanging when Claude exits)
     cd "$PROJECT_DIR"
-    claude --dangerously-skip-permissions -p "$CLAUDE_PROMPT" 2>&1 | tee -a "$LOG_FILE"
-    EXIT_CODE=${PIPESTATUS[0]}
+    claude --dangerously-skip-permissions -p "$CLAUDE_PROMPT" >> "$LOG_FILE" 2>&1
+    EXIT_CODE=$?
 
     # Stop background watchers
     kill "$WATCHER_PID" 2>/dev/null
