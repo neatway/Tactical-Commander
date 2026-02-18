@@ -1,5 +1,65 @@
 # Overnight Build Log
 
+## Session 3 — Milestone 1 Complete (2026-02-18)
+
+### What was done this session
+
+1. **Buy menu UI verified and committed (COMPLETE)**
+   - BuyMenu.ts was already written in previous session, verified build and committed
+   - HTML overlay for purchasing weapons/armor/utility with full purchase logic
+   - Button states: enabled/disabled/equipped based on affordability and loadout
+
+2. **Utility system (COMPLETE)**
+   - Created `client/src/simulation/Utility.ts` — UtilitySystem class
+   - SMOKE: blocks LOS between soldiers (point-to-segment distance check)
+   - FLASH: blinds soldiers in radius, intensity scales with distance, thrower immune
+   - FRAG: instant area damage with linear falloff, 50% self-damage reduction
+   - MOLOTOV: continuous DPS (25/s) to soldiers standing in fire zone
+   - DECOY: provides fake detection pings for AI
+   - Added `isBlinded` and `blindedTimer` fields to SoldierRuntimeState
+   - Wired into Game.ts: throw utility via number keys 1-4 + click on map
+   - Detection integration: smoke blocks LOS, blinded soldiers can't detect
+   - Combat integration: blinded soldiers can't fire
+
+3. **Bomb plant/defuse system (COMPLETE)**
+   - Created `client/src/simulation/BombLogic.ts` — zone checks, progress tracking
+   - Plant: hold P key while attacker with bomb is in plant zone, 3s to complete
+   - Defuse: hold E key while defender is near bomb, 5s without kit / 3s with kit
+   - Phase transition: plant completion → POST_PLANT phase (40s bomb timer)
+   - Defuse completion → defenders win the round
+   - Damage interrupts plant/defuse actions (resets progress)
+   - Added `bombDefused` field to GameState for round history tracking
+
+4. **Fog of war (COMPLETE)**
+   - Created `client/src/rendering/FogOfWar.ts` — canvas-based texture overlay
+   - Three fog states: unexplored (85% opaque), explored (45% opaque), visible (clear)
+   - Reveal radius based on soldier AWR stat via `calculateDetectionRadius()`
+   - Soft edge falloff at 70-100% of reveal radius
+   - Enemy soldiers hidden unless detected by friendly soldiers
+   - Low-resolution grid (20px cells) with linear filter for soft edges
+   - Reset on round start; explored state persists within a round
+
+5. **MILESTONE 1: CORE PROTOTYPE — 100% COMPLETE**
+   - All M1 checklist items are done
+   - 30 modules compile and build successfully
+   - Zero TypeScript errors
+
+### What needs to happen next (IN THIS ORDER — M2 Tasks)
+1. **Economy manager** — Kill rewards by weapon, bomb plant/defuse bonus ($300), proper round rewards
+2. **Equipment persistence** — Surviving soldiers keep their weapons next round
+3. **Round summary screen** — Kill feed, MVP, economy changes, round winner display
+4. **Strategy phase UI** — Waypoint editor, stance selection, timing links between soldiers
+
+### Important notes
+- `E` key is used for defuse (not `D`, which conflicts with camera pan right)
+- `P` key is used for plant (hold action, not single press)
+- Utility throw: press 1-4 to select slot, then left-click to throw at position
+- Fog of war hides enemy soldiers at the renderer level (alive=false for undetected enemies)
+- Smoke blocks LOS in both the fresh detection check and the persistence check
+- Flash blind completely prevents detection and combat until timer expires
+
+---
+
 ## Session 2 — Wire Movement + Detection + Combat (2026-02-18)
 
 ### What was done this session

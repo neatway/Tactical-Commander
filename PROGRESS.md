@@ -8,13 +8,13 @@
 
 | Milestone | Description | Progress |
 |-----------|-------------|----------|
-| **M1** | Core Prototype (playable in browser) | ~90% |
+| **M1** | Core Prototype (playable in browser) | 100% |
 | **M2** | Full Round Loop + Economy | ~20% |
 | **M3** | Online Multiplayer | ~5% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
 | **M5** | Polish & Balance (ranks, maps, audio, replays) | 0% |
 
-**Overall: ~25%** — Movement, detection, and combat systems wired into game loop.
+**Overall: ~30%** — Milestone 1 complete. All core prototype systems implemented.
 
 ---
 
@@ -52,7 +52,7 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 ### In Progress
 
 - [x] **Integration pass** — Fixed imports, reconciled types, core rendering compiles and runs
-- [ ] **Fog of war** — Texture-based visibility masking
+- [x] **Fog of war** — Texture-based visibility masking
 - [x] **Basic AI opponent** — BotAI class with per-soldier state machine, preset strategies, engagement/rotation logic
 - [x] **Utility system** — Smoke (blocks vision), flash (blinds), frag (area damage), molotov (area denial), decoy (fake sounds)
 - [x] **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
