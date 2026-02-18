@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=forking
-User=root
-ExecStart=/usr/bin/tmux new-session -d -s claude-worker "bash /root/run-claude.sh"
+User=claude-worker
+ExecStart=/usr/bin/tmux new-session -d -s claude-worker "bash /home/claude-worker/run-claude.sh"
 ExecStop=/usr/bin/tmux kill-session -t claude-worker
 RemainAfterExit=yes
 Restart=on-failure

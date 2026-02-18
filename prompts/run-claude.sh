@@ -14,7 +14,7 @@
 # ============================================================================
 
 # --- Configuration ---
-PROJECT_DIR="/root/1v1-strat-game"
+PROJECT_DIR="$HOME/1v1-strat-game"
 LOG_FILE="$HOME/claude-runner.log"
 OVERNIGHT_LOG="$PROJECT_DIR/OVERNIGHT-LOG.md"
 SESSION_COUNT=0
@@ -170,6 +170,42 @@ watch_commits() {
     done
 }
 
+# --- Helper: send a status heartbeat to Discord every 5 minutes ---
+heartbeat() {
+    local beat_count=0
+
+    while true; do
+        sleep 300  # 5 minutes
+        beat_count=$((beat_count + 1))
+        local mins=$((beat_count * 5))
+
+        # Gather current status info
+        local recent_log
+        recent_log=$(tail -8 "$LOG_FILE" 2>/dev/null | grep -v '^\[' | head -5)
+        if [ -z "$recent_log" ]; then
+            recent_log=$(tail -5 "$LOG_FILE" 2>/dev/null)
+        fi
+
+        local git_status
+        git_status=$(cd "$PROJECT_DIR" && git log --oneline -3 2>/dev/null)
+
+        local overnight_status=""
+        if [ -f "$OVERNIGHT_LOG" ]; then
+            # Grab the last "what's next" or recent lines
+            overnight_status=$(tail -6 "$OVERNIGHT_LOG" 2>/dev/null)
+        fi
+
+        # Build heartbeat message
+        local desc="**Session #$SESSION_COUNT** | ${mins}min elapsed\n\n"
+        desc+="**Recent commits:**\n\`\`\`\n$git_status\n\`\`\`\n"
+        if [ -n "$overnight_status" ]; then
+            desc+="**OVERNIGHT-LOG (latest):**\n\`\`\`\n$overnight_status\n\`\`\`"
+        fi
+
+        discord_embed "Heartbeat (${mins}m)" "$desc" "8421504"
+    done
+}
+
 # --- Main loop ---
 log "=========================================="
 log "Claude Runner started"
@@ -196,18 +232,22 @@ while true; do
     log "--- Session #$SESSION_COUNT starting ---"
     discord_embed "Session #$SESSION_COUNT Started" "Claude is working on Tactical Commander.\nCheck progress: \`cat OVERNIGHT-LOG.md\`" "3447003"
 
-    # Start commit watcher in background
+    # Start commit watcher and heartbeat in background
     watch_commits &
     WATCHER_PID=$!
+    heartbeat &
+    HEARTBEAT_PID=$!
 
     # Run Claude — let it work until it exits on its own
     cd "$PROJECT_DIR"
     claude --dangerously-skip-permissions -p "$CLAUDE_PROMPT" 2>&1 | tee -a "$LOG_FILE"
     EXIT_CODE=${PIPESTATUS[0]}
 
-    # Stop commit watcher
+    # Stop background watchers
     kill "$WATCHER_PID" 2>/dev/null
+    kill "$HEARTBEAT_PID" 2>/dev/null
     wait "$WATCHER_PID" 2>/dev/null
+    wait "$HEARTBEAT_PID" 2>/dev/null
 
     log "Claude exited with code $EXIT_CODE"
 
