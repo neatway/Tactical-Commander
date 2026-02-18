@@ -22,6 +22,7 @@ import { Renderer } from '../rendering/Renderer';
 import { MapRenderer } from '../rendering/MapRenderer';
 import { SoldierRenderer } from '../rendering/SoldierRenderer';
 import { CameraController } from '../rendering/Camera';
+import { FogOfWar } from '../rendering/FogOfWar';
 import { InputManager, MouseButton } from './InputManager';
 import { CommandSystem, CommandType } from './CommandSystem';
 import { MovementSystem } from '../simulation/Movement';
@@ -135,6 +136,8 @@ export class Game {
   private utilitySystem: UtilitySystem;
   /** Bomb plant/defuse logic — zone checks, progress tracking */
   private bombLogic: BombLogic | null = null;
+  /** Fog of war overlay — texture-based visibility masking */
+  private fogOfWar: FogOfWar | null = null;
   /** AI opponent controlling player 2's soldiers */
   private botAI: BotAI | null = null;
 
@@ -253,6 +256,14 @@ export class Game {
     /* Initialize bomb plant/defuse logic with the map's bomb sites */
     this.bombLogic = new BombLogic(BAZAAR_MAP.bombSites);
     console.log('[Game] Bomb logic initialized with', BAZAAR_MAP.bombSites.length, 'bomb sites');
+
+    /* Initialize fog of war overlay on the map */
+    this.fogOfWar = new FogOfWar(
+      this.renderer.getScene(),
+      BAZAAR_MAP.dimensions.width,
+      BAZAAR_MAP.dimensions.height
+    );
+    console.log('[Game] Fog of war initialized');
 
     /* Update camera bounds to match loaded map */
     this.cameraController = new CameraController(
@@ -719,7 +730,10 @@ export class Game {
     /* Step 7: Update bomb plant/defuse progress */
     this.updateBombActions();
 
-    /* Step 8: Check round end conditions */
+    /* Step 8: Update fog of war based on friendly soldier positions */
+    this.updateFogOfWar();
+
+    /* Step 9: Check round end conditions */
     this.checkRoundEndConditions();
   }
 
@@ -1662,7 +1676,31 @@ export class Game {
   }
 
   // ============================================================
-  // Round End Conditions (Sim Step 8)
+  // Fog of War (Sim Step 8)
+  // ============================================================
+
+  /**
+   * Update the fog of war overlay based on friendly soldier positions.
+   *
+   * The fog reveals circular areas around each alive friendly soldier.
+   * The radius is determined by the soldier's AWR stat (detection radius).
+   *
+   * Called once per simulation tick (5 times/second) for performance.
+   */
+  private updateFogOfWar(): void {
+    if (!this.fogOfWar) return;
+
+    /* Get the local player's soldiers */
+    const mySoldiers = this.localPlayer === 1
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+
+    /* Update the fog texture with current soldier positions */
+    this.fogOfWar.update(mySoldiers);
+  }
+
+  // ============================================================
+  // Round End Conditions (Sim Step 9)
   // ============================================================
 
   /**
@@ -1882,6 +1920,11 @@ export class Game {
     /* Clear all active utility effects from the previous round */
     this.utilitySystem.clearAll();
 
+    /* Reset fog of war for the new round */
+    if (this.fogOfWar) {
+      this.fogOfWar.reset();
+    }
+
     /* Re-initialize bot AI for the new round with updated side */
     if (this.botAI) {
       const botSide = this.state.player1Side === Side.ATTACKER
@@ -1908,21 +1951,52 @@ export class Game {
    * This runs every frame for smooth rendering.
    */
   private updateVisuals(): void {
-    /* Update all soldier positions and visual state */
-    const updateTeam = (soldiers: SoldierRuntimeState[], prefix: string) => {
-      for (const soldier of soldiers) {
-        this.soldierRenderer.updateSoldier(
-          `${prefix}_${soldier.index}`,
-          soldier.position,
-          soldier.rotation,
-          soldier.health / 100,  /* Normalize 0-100 to 0.0-1.0 for renderer */
-          soldier.alive
-        );
-      }
-    };
+    /* Determine which soldiers are friendly and which are enemy */
+    const mySoldiers = this.localPlayer === 1
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+    const enemySoldiers = this.localPlayer === 1
+      ? this.state.player2Soldiers
+      : this.state.player1Soldiers;
+    const myPrefix = this.localPlayer === 1 ? 'p1' : 'p2';
+    const enemyPrefix = this.localPlayer === 1 ? 'p2' : 'p1';
 
-    updateTeam(this.state.player1Soldiers, 'p1');
-    updateTeam(this.state.player2Soldiers, 'p2');
+    /* Update friendly soldiers — always visible to the player */
+    for (const soldier of mySoldiers) {
+      this.soldierRenderer.updateSoldier(
+        `${myPrefix}_${soldier.index}`,
+        soldier.position,
+        soldier.rotation,
+        soldier.health / 100,
+        soldier.alive
+      );
+    }
+
+    /**
+     * Update enemy soldiers — only show them if they are detected
+     * by at least one of our soldiers (fog of war enforcement).
+     * Undetected enemies are hidden by passing alive=false to the renderer.
+     */
+    for (const enemy of enemySoldiers) {
+      /* Check if any of our soldiers currently detect this enemy */
+      const isDetected = mySoldiers.some(
+        s => s.alive && s.detectedEnemies.includes(enemy.soldierId)
+      );
+
+      /**
+       * Show the enemy if: they're detected AND alive.
+       * If not detected, hide them regardless of alive status.
+       */
+      const showEnemy = enemy.alive && isDetected;
+
+      this.soldierRenderer.updateSoldier(
+        `${enemyPrefix}_${enemy.index}`,
+        enemy.position,
+        enemy.rotation,
+        enemy.health / 100,
+        showEnemy
+      );
+    }
 
     /* Update the HUD overlay with current game state */
     this.hud.update(this.state, this.localPlayer, this.selectedSoldier);

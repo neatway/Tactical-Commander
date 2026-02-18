@@ -8,7 +8,7 @@
 
 | Milestone | Description | Progress |
 |-----------|-------------|----------|
-| **M1** | Core Prototype (playable in browser) | ~80% |
+| **M1** | Core Prototype (playable in browser) | ~90% |
 | **M2** | Full Round Loop + Economy | ~20% |
 | **M3** | Online Multiplayer | ~5% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
@@ -55,7 +55,7 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 - [ ] **Fog of war** — Texture-based visibility masking
 - [x] **Basic AI opponent** — BotAI class with per-soldier state machine, preset strategies, engagement/rotation logic
 - [x] **Utility system** — Smoke (blocks vision), flash (blinds), frag (area damage), molotov (area denial), decoy (fake sounds)
-- [ ] **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
+- [x] **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
 
 ### Known Issues To Fix
 
