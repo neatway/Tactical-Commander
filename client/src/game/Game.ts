@@ -5,10 +5,16 @@
  * simulation, and UI. It runs the game loop, manages phase transitions,
  * and coordinates all subsystems.
  *
- * The game loop runs at 60fps for rendering, but the simulation ticks
- * at 5 ticks/second (200ms intervals) matching the server tick rate.
+ * Supports two modes:
+ *   - **Single-player (vs Bot):** Local simulation runs at 5 ticks/sec.
+ *   - **Multiplayer:** Server is authoritative. Client renders server state
+ *     received via GAME_STATE_UPDATE and sends commands via SocketClient.
  *
- * Simulation tick order (each 200ms):
+ * In multiplayer mode, the local simulation tick is skipped entirely.
+ * Instead, applyServerState() maps the fog-of-war filtered state from
+ * the server onto the local SoldierRuntimeState arrays for rendering.
+ *
+ * Simulation tick order (single-player only, each 200ms):
  *   1. Process ready commands
  *   2. Run bot AI decision-making (player 2)
  *   3. Update movement (A* pathfinding + stat-driven speed)
@@ -75,6 +81,14 @@ import { SeededRandom } from '@shared/util/RandomUtils';
 import { distance as vecDistance } from '@shared/util/MathUtils';
 
 import type { Wall } from '@shared/types/MapTypes';
+
+/* Multiplayer networking client */
+import {
+  SocketClient,
+  type FilteredGameState,
+  type ServerSoldierState,
+  type ServerKillRecord,
+} from '../network/SocketClient';
 
 // ============================================================
 // Constants
@@ -198,6 +212,26 @@ export class Game {
    * Reset at the start of each new round.
    */
   private lastRoundEconomyUpdate: EconomyUpdate | null = null;
+
+  // --- Multiplayer ---
+  /**
+   * Whether this game instance is running in multiplayer mode.
+   * In multiplayer mode, the server is authoritative: local simulation
+   * is disabled and state comes from GAME_STATE_UPDATE messages.
+   */
+  private isMultiplayer: boolean = false;
+
+  /**
+   * Socket.io client for server communication.
+   * Only set when running in multiplayer mode.
+   */
+  private socketClient: SocketClient | null = null;
+
+  /**
+   * The room ID of the current multiplayer match.
+   * Used for reconnection after disconnect.
+   */
+  private roomId: string | null = null;
 
   /**
    * Initialize all game systems.
@@ -365,6 +399,400 @@ export class Game {
     this.gameLoop(this.lastFrameTime);
 
     console.log('[Game] Match started - Round 1, Buy Phase');
+  }
+
+  // ============================================================
+  // Multiplayer Match Lifecycle
+  // ============================================================
+
+  /**
+   * Start a multiplayer match. Loads the map, spawns soldier visuals,
+   * and connects to the server via SocketClient for authoritative state.
+   *
+   * In multiplayer mode:
+   *   - Local simulation (detection, combat, movement) is disabled
+   *   - Server sends GAME_STATE_UPDATE every tick with fog-of-war filtered state
+   *   - Phase transitions come from the server via PHASE_CHANGE events
+   *   - Commands are sent to the server via SocketClient.sendCommand()
+   *
+   * @param client - Connected SocketClient instance
+   * @param roomId - The match room ID from the server
+   * @param playerNumber - Which player we are (1 or 2)
+   */
+  async startMultiplayerMatch(
+    client: SocketClient,
+    roomId: string,
+    playerNumber: 1 | 2
+  ): Promise<void> {
+    console.log(`[Game] Starting multiplayer match as Player ${playerNumber} in room ${roomId}`);
+
+    this.isMultiplayer = true;
+    this.socketClient = client;
+    this.roomId = roomId;
+    this.localPlayer = playerNumber;
+
+    /* Load the map (same as single-player) */
+    const { BAZAAR_MAP } = await import('../assets/maps/bazaar');
+    this.mapRenderer.loadMap(BAZAAR_MAP);
+    this.walls = BAZAAR_MAP.walls;
+    this.mapData = BAZAAR_MAP;
+
+    /* Initialize pathfinding and detection for local predictions (optional) */
+    this.movementSystem = new MovementSystem(BAZAAR_MAP);
+    this.detectionSystem = new DetectionSystem(BAZAAR_MAP.walls);
+
+    /* Initialize bomb logic for zone checks */
+    this.bombLogic = new BombLogic(BAZAAR_MAP.bombSites);
+
+    /* Initialize fog of war overlay */
+    this.fogOfWar = new FogOfWar(
+      this.renderer.getScene(),
+      BAZAAR_MAP.dimensions.width,
+      BAZAAR_MAP.dimensions.height
+    );
+
+    /* Update camera bounds */
+    this.cameraController = new CameraController(
+      this.renderer.getCamera(),
+      BAZAAR_MAP.dimensions.width,
+      BAZAAR_MAP.dimensions.height
+    );
+    this.cameraController.focusOn(
+      BAZAAR_MAP.dimensions.width / 2,
+      BAZAAR_MAP.dimensions.height / 2
+    );
+
+    /* Spawn soldier visuals for both teams */
+    this.spawnSoldiers(BAZAAR_MAP);
+
+    /* No bot AI in multiplayer — the opponent is a real player */
+    this.botAI = null;
+
+    /* Wire up server event handlers */
+    this.wireServerCallbacks(client);
+
+    /* Set initial phase (server will send PHASE_CHANGE to update) */
+    this.state.phase = GamePhase.BUY_PHASE;
+    this.state.timeRemaining = 20;
+    this.state.roundNumber = 1;
+    this.gameTime = 0;
+
+    /* Start the game loop (rendering + input only, no local sim) */
+    this.running = true;
+    this.lastFrameTime = performance.now();
+    this.gameLoop(this.lastFrameTime);
+
+    console.log(`[Game] Multiplayer match started - Player ${playerNumber}`);
+  }
+
+  /**
+   * Wire up SocketClient callbacks for multiplayer events.
+   * These replace the local simulation's role in updating game state.
+   *
+   * @param client - The connected SocketClient
+   */
+  private wireServerCallbacks(client: SocketClient): void {
+    /**
+     * PHASE_CHANGE: Server tells us the current phase, timer, and score.
+     * This replaces the local advancePhase() state machine in multiplayer.
+     */
+    client.onPhaseChange = (data) => {
+      const previousPhase = this.state.phase;
+
+      /* Map the server's phase string to our local GamePhase enum */
+      this.state.phase = data.phase as GamePhase;
+      this.state.timeRemaining = data.timeRemaining;
+      this.state.roundNumber = data.roundNumber;
+      this.state.score = { ...data.score };
+
+      /* Map player1Side from the server */
+      if (data.player1Side === 'ATTACKER') {
+        this.state.player1Side = Side.ATTACKER;
+      } else {
+        this.state.player1Side = Side.DEFENDER;
+      }
+
+      /* Show/hide strategy editor on phase transitions */
+      if (this.state.phase === GamePhase.STRATEGY_PHASE && previousPhase !== GamePhase.STRATEGY_PHASE) {
+        const mySoldiers = this.localPlayer === 1
+          ? this.state.player1Soldiers
+          : this.state.player2Soldiers;
+        this.strategyEditor.show(mySoldiers, this.selectedSoldier ?? 0);
+      } else if (previousPhase === GamePhase.STRATEGY_PHASE && this.state.phase !== GamePhase.STRATEGY_PHASE) {
+        this.strategyEditor.hide();
+      }
+
+      /* Reset game time when entering LIVE_PHASE */
+      if (this.state.phase === GamePhase.LIVE_PHASE && previousPhase !== GamePhase.LIVE_PHASE) {
+        this.gameTime = 0;
+        this.state.tick = 0;
+      }
+
+      console.log(`[MP] Phase: ${data.phase} (${data.timeRemaining}s) Round: ${data.roundNumber}`);
+    };
+
+    /**
+     * GAME_STATE_UPDATE: Authoritative state from the server.
+     * Contains fog-of-war filtered view. Replaces local simulation entirely.
+     * Received 5 times/sec during LIVE_PHASE and POST_PLANT.
+     */
+    client.onGameStateUpdate = (data) => {
+      this.applyServerState(data.state, data.kills, data.tick, data.timeRemaining);
+    };
+
+    /**
+     * BOMB_PLANTED: The bomb was planted. Transition to POST_PLANT.
+     * The server also sends this as part of PHASE_CHANGE, but this
+     * event carries the bomb position and site info.
+     */
+    client.onBombPlanted = (data) => {
+      this.state.bombPlanted = true;
+      this.state.bombPosition = { ...data.bombPosition };
+      this.state.bombSite = data.bombSite;
+      console.log(`[MP] Bomb planted at site ${data.bombSite}`);
+    };
+
+    /**
+     * ROUND_END: The round ended. Server sends winner and score.
+     * Trigger the local round summary display.
+     */
+    client.onRoundEnd = (data) => {
+      const winner = data.winner === 'ATTACKER' ? Side.ATTACKER : Side.DEFENDER;
+
+      /* Update score from server */
+      this.state.score = { ...data.score };
+      this.state.bombPlanted = data.bombPlanted;
+      this.state.bombDefused = data.bombDefused;
+
+      /* Transition to ROUND_END phase */
+      this.state.phase = GamePhase.ROUND_END;
+      this.state.timeRemaining = 5;
+
+      /* Show round summary with available kill data */
+      const localSide = this.localPlayer === 1
+        ? this.state.player1Side
+        : (this.state.player1Side === Side.ATTACKER ? Side.DEFENDER : Side.ATTACKER);
+
+      /**
+       * In multiplayer, economy details come from the server.
+       * For now, show a basic summary without detailed economy breakdown.
+       * TODO: Server should send economy details in ROUND_END.
+       */
+      this.roundSummary.show(
+        winner,
+        data.roundNumber,
+        data.score,
+        this.state.currentRoundKills,
+        localSide,
+        /* Placeholder economy — server doesn't send detailed breakdown yet */
+        { roundReward: 0, killRewards: 0, objectiveBonus: 0, totalEarned: 0 },
+        { roundReward: 0, killRewards: 0, objectiveBonus: 0, totalEarned: 0 },
+        data.bombPlanted,
+        data.bombDefused,
+      );
+
+      console.log(
+        `[MP] Round ${data.roundNumber}: ${data.winner} wins.` +
+        ` Score: ${data.score.player1}-${data.score.player2}`
+      );
+    };
+
+    /**
+     * MATCH_END: The match is over. Display final result.
+     */
+    client.onMatchEnd = (data) => {
+      this.state.phase = GamePhase.MATCH_END;
+      console.log(
+        `[MP] MATCH OVER! ${data.winner} wins` +
+        ` ${data.finalScore.player1}-${data.finalScore.player2}`
+      );
+    };
+
+    /**
+     * OPPONENT_DISCONNECTED: The other player disconnected.
+     * TODO: Show a UI notification with reconnect countdown.
+     */
+    client.onOpponentDisconnected = (data) => {
+      console.log(`[MP] Opponent disconnected — ${data.timeoutSeconds}s to reconnect`);
+    };
+  }
+
+  /**
+   * Apply the authoritative game state from the server to the local state.
+   *
+   * This is the core of client-side state reconciliation in multiplayer.
+   * The server sends a fog-of-war filtered view:
+   *   - ownSoldiers: Full state for all 5 of our soldiers
+   *   - visibleEnemies: Partial state for enemies that are detected
+   *
+   * We map this onto the local SoldierRuntimeState arrays so the renderer
+   * can display the correct positions, health, and combat status.
+   *
+   * Enemies that are NOT in visibleEnemies are hidden (alive=false for rendering).
+   *
+   * @param serverState - Fog-of-war filtered state from the server
+   * @param kills - Kill records from this tick
+   * @param tick - Server tick number
+   * @param timeRemaining - Seconds remaining in the current phase
+   */
+  private applyServerState(
+    serverState: FilteredGameState,
+    kills: ServerKillRecord[],
+    tick: number,
+    timeRemaining: number
+  ): void {
+    this.state.tick = tick;
+    this.state.timeRemaining = timeRemaining;
+
+    /* Update bomb state from server */
+    this.state.bombPlanted = serverState.bombPlanted;
+    this.state.bombPosition = serverState.bombPosition ? { ...serverState.bombPosition } : null;
+    this.state.bombSite = serverState.bombSite;
+    this.state.bombTimer = serverState.bombTimer;
+
+    /* Determine which local arrays correspond to own/enemy */
+    const ownSoldiers = this.localPlayer === 1
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+    const enemySoldiers = this.localPlayer === 1
+      ? this.state.player2Soldiers
+      : this.state.player1Soldiers;
+
+    /**
+     * Apply own soldier state from the server.
+     * The server sends full state for all 5 of our soldiers.
+     * Map each server soldier onto the matching local soldier by index.
+     */
+    for (const serverSoldier of serverState.ownSoldiers) {
+      const local = ownSoldiers[serverSoldier.index];
+      if (!local) continue;
+
+      local.position.x = serverSoldier.position.x;
+      local.position.z = serverSoldier.position.z;
+      local.rotation = serverSoldier.rotation;
+      local.health = serverSoldier.health;
+      local.alive = serverSoldier.alive;
+      local.currentWeapon = serverSoldier.currentWeapon as WeaponId;
+      local.isMoving = serverSoldier.isMoving;
+      local.isInCombat = serverSoldier.isInCombat;
+      local.isPlanting = serverSoldier.isPlanting ?? false;
+      local.isDefusing = serverSoldier.isDefusing ?? false;
+    }
+
+    /**
+     * Apply visible enemy state from the server.
+     * First, mark all enemies as "not detected" (hidden).
+     * Then, for each visible enemy, update their state.
+     */
+    for (const enemy of enemySoldiers) {
+      enemy.detectedEnemies = []; /* Clear — not used for enemies */
+    }
+
+    /* Build a set of visible enemy IDs for fog-of-war rendering */
+    const visibleEnemyIds = new Set<string>();
+    for (const serverEnemy of serverState.visibleEnemies) {
+      if (serverEnemy.soldierId) {
+        visibleEnemyIds.add(serverEnemy.soldierId);
+      }
+    }
+
+    /* Mark all own soldiers as detecting the visible enemies */
+    for (const own of ownSoldiers) {
+      if (!own.alive) {
+        own.detectedEnemies = [];
+        continue;
+      }
+      own.detectedEnemies = Array.from(visibleEnemyIds);
+    }
+
+    /**
+     * Update visible enemy soldier positions and state.
+     * Enemies not in visibleEnemies are left unchanged (hidden by fog of war).
+     */
+    for (const serverEnemy of serverState.visibleEnemies) {
+      if (serverEnemy.index === undefined) continue;
+      const local = enemySoldiers[serverEnemy.index];
+      if (!local) continue;
+
+      /* Update position and visual state from server */
+      if (serverEnemy.position) {
+        local.position.x = serverEnemy.position.x;
+        local.position.z = serverEnemy.position.z;
+      }
+      if (serverEnemy.rotation !== undefined) local.rotation = serverEnemy.rotation;
+      if (serverEnemy.health !== undefined) local.health = serverEnemy.health;
+      if (serverEnemy.alive !== undefined) local.alive = serverEnemy.alive;
+      if (serverEnemy.currentWeapon) local.currentWeapon = serverEnemy.currentWeapon as WeaponId;
+      if (serverEnemy.isMoving !== undefined) local.isMoving = serverEnemy.isMoving;
+      if (serverEnemy.isInCombat !== undefined) local.isInCombat = serverEnemy.isInCombat;
+    }
+
+    /**
+     * Process kill records from this tick.
+     * Add them to the current round kill log for the summary screen.
+     */
+    for (const kill of kills) {
+      this.state.currentRoundKills.push({
+        killerId: kill.killerId,
+        victimId: kill.victimId,
+        weapon: kill.weapon,
+        headshot: kill.headshot,
+        tick: kill.tick,
+      });
+    }
+
+    /**
+     * Update fog of war based on own soldier positions.
+     * Even in multiplayer, fog of war is rendered client-side.
+     */
+    if (this.fogOfWar) {
+      this.updateFogOfWar();
+    }
+  }
+
+  /**
+   * Send a command to the server in multiplayer mode.
+   * This wraps SocketClient.sendCommand() with the proper message format.
+   *
+   * @param type - Command type (MOVE, RUSH, HOLD, etc.)
+   * @param soldierIndex - Target soldier index (0-4)
+   * @param targetPos - Target position for movement commands
+   * @param utilityType - Utility type for USE_UTILITY commands
+   */
+  private sendMultiplayerCommand(
+    type: string,
+    soldierIndex: number,
+    targetPos?: Position,
+    utilityType?: string
+  ): void {
+    if (!this.socketClient) return;
+
+    this.socketClient.sendCommand({
+      type: type as import('@shared/types/MessageTypes').CommandType,
+      soldierIndex,
+      targetPosition: targetPos,
+      utilityType,
+    });
+
+    console.log(
+      `[MP] Sent ${type} for soldier ${soldierIndex}` +
+      (targetPos ? ` -> (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})` : '')
+    );
+  }
+
+  /**
+   * Get the SocketClient instance (for external access, e.g., sending buy orders).
+   * Returns null if not in multiplayer mode.
+   */
+  getSocketClient(): SocketClient | null {
+    return this.socketClient;
+  }
+
+  /**
+   * Check if the game is running in multiplayer mode.
+   */
+  getIsMultiplayer(): boolean {
+    return this.isMultiplayer;
   }
 
   /**

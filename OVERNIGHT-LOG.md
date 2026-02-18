@@ -43,20 +43,42 @@
    - Strategy plans validated (array of waypoint arrays, positions clamped)
    - Applied as initial MOVE commands when LIVE_PHASE starts
 
+8. **Server-side A* pathfinding (COMPLETE)**
+   - Created `server/src/simulation/ServerPathfinding.ts` — standalone A* implementation
+   - Navigation grid from wall data (50px cells), 8-directional movement, Manhattan heuristic
+   - Path smoothing via LOS checks (Liang-Barsky line-rect intersection)
+   - Integrated into ServerSimulation: MOVE, RUSH, REGROUP commands now use A* paths
+   - Added PLANT_BOMB, DEFUSE_BOMB, REGROUP command handling
+
+9. **Event generation in simulation ticks (COMPLETE)**
+   - resolveShot() emits SHOT_FIRED, HIT, KILL events with weapon/headshot/position data
+   - updateBombActions() emits BOMB_PLANTED, BOMB_DEFUSED, BOMB_EXPLODED events
+   - tickEvents field reset each tick, accessible via getTickEvents()
+
+10. **Server-side utility system (COMPLETE)**
+    - Created `server/src/simulation/ServerUtility.ts` — standalone utility system
+    - SMOKE: blocks LOS (150px radius, 18s), checked in hasLineOfSight()
+    - FLASH: blinds soldiers in radius (400px, up to 2s), thrower immune
+    - FRAG: instant area damage (100 max, linear falloff over 200px), 50% self-damage
+    - MOLOTOV: continuous DPS (25/s) within 120px radius for 7s
+    - DECOY: fake detection pings (300px, 10s)
+    - Integrated into ServerSimulation tick pipeline between combat and blind timers
+    - USE_UTILITY command handling with UTILITY_USED event generation
+
 ### Currently working on
-- All M3 checklist items are now complete
-- Server starts and runs with full simulation pipeline
+- M3 server simulation is now fully featured (pathfinding, combat, detection, utility, events)
+- Moving on to client-side state reconciliation
 
 ### What needs to happen next (IN THIS ORDER — remaining work)
-1. **Integration test** — Run two browser tabs, both connect, verify matchmaking + game flow
-2. **Client-side state reconciliation** — Game.ts reads GAME_STATE_UPDATE and applies server state
+1. **Client-side state reconciliation** — Game.ts reads GAME_STATE_UPDATE and applies server state
+2. **Integration test** — Run two browser tabs, both connect, verify matchmaking + game flow
 3. **Milestone 4: Meta-Game** — PostgreSQL schema, auth, crate system, inventory UI
 
 ### Important notes
 - Server is at `npm run server` (tsx server/src/index.ts, port 4000)
 - Client is at `npm run dev` (Vite, port 3000)
-- GameRoom now uses hardcoded Bazaar map data (walls + spawn zones). Future: load from shared map module.
-- ServerSimulation uses direct movement (no A* pathfinding yet). TODO: add server-side A* from shared grid.
+- GameRoom uses hardcoded Bazaar map data (walls + spawn zones). Future: load from shared map module.
+- Server now has full A* pathfinding — soldiers navigate around walls
 - The client can still run in single-player mode (vs bot) without server connection.
 
 ---

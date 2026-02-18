@@ -10,7 +10,7 @@
 |-----------|-------------|----------|
 | **M1** | Core Prototype (playable in browser) | 100% |
 | **M2** | Full Round Loop + Economy | 100% |
-| **M3** | Online Multiplayer | ~85% |
+| **M3** | Online Multiplayer | ~90% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
 | **M5** | Polish & Balance (ranks, maps, audio, replays) | 0% |
 
