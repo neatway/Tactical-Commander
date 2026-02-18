@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tactical Commander</title>
+  <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body>
+  <!-- Three.js renders into this canvas -->
+  <canvas id="game-canvas"></canvas>
+
+  <!-- UI overlay sits on top of the 3D scene -->
+  <div id="ui-overlay">
+    <!-- HUD elements (timer, money, alive count) injected by code -->
+    <div id="hud"></div>
+    <!-- Buy menu (shown during buy phase) -->
+    <div id="buy-menu" class="hidden"></div>
+    <!-- Round summary (shown at round end) -->
+    <div id="round-summary" class="hidden"></div>
+  </div>
+
+  <!-- Entry point - Vite handles the module bundling -->
+  <script type="module" src="src/main.ts"></script>
+</body>
+</html>

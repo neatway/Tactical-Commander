@@ -1,0 +1,90 @@
+/* ===========================================
+ * Tactical Commander - Main Stylesheet
+ * Handles layout for the game canvas and UI overlay
+ * =========================================== */
+
+/* Reset defaults - game takes up full viewport */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden; /* No scrollbars - game handles its own scrolling */
+  background: #1a1a1a;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  color: #ffffff;
+}
+
+/* The Three.js canvas fills the entire viewport */
+#game-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* UI overlay sits on top of the canvas, doesn't block mouse events by default */
+#ui-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none; /* Let clicks pass through to the canvas */
+}
+
+/* HUD elements DO capture mouse events (buttons, etc.) */
+#ui-overlay > * {
+  pointer-events: auto;
+}
+
+/* HUD container - top bar with game info */
+#hud {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding: 10px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0) 100%);
+  pointer-events: none;
+}
+
+/* Utility class to hide elements */
+.hidden {
+  display: none !important;
+}
+
+/* Buy menu overlay - centered modal */
+#buy-menu {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(20, 20, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 20px;
+  min-width: 600px;
+}
+
+/* Round summary overlay - centered */
+#round-summary {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(20, 20, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 30px;
+  text-align: center;
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Claude Code Auto-Worker for Tactical Commander
+After=network.target
+
+[Service]
+Type=forking
+User=root
+ExecStart=/usr/bin/tmux new-session -d -s claude-worker "bash /root/run-claude.sh"
+ExecStop=/usr/bin/tmux kill-session -t claude-worker
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
