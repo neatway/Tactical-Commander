@@ -180,7 +180,7 @@ export class HUD {
    */
   private getSoldierInfoHTML(soldier: SoldierRuntimeState): string {
     const healthColor = soldier.health > 60 ? '#44ff44' : soldier.health > 30 ? '#ffff44' : '#ff4444';
-    const weapon = soldier.primaryWeapon ?? 'Pistol';
+    const weapon = soldier.currentWeapon ?? 'Pistol';
     return `
       <span class="soldier-name">Soldier ${soldier.index + 1}</span>
       <span class="soldier-hp" style="color:${healthColor}">HP: ${soldier.health}</span>

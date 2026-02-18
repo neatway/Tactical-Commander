@@ -8,13 +8,13 @@
 
 | Milestone | Description | Progress |
 |-----------|-------------|----------|
-| **M1** | Core Prototype (playable in browser) | ~45% |
+| **M1** | Core Prototype (playable in browser) | ~65% |
 | **M2** | Full Round Loop + Economy | ~10% |
 | **M3** | Online Multiplayer | ~5% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
 | **M5** | Polish & Balance (ranks, maps, audio, replays) | 0% |
 
-**Overall: ~18%** — Core rendering pipeline integrated and running in browser.
+**Overall: ~25%** — Movement, detection, and combat systems wired into game loop.
 
 ---
 
@@ -39,12 +39,15 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 - [x] **HUD overlay** — Score, phase, timer, round number, money (color-coded), alive counts, selected soldier info
 - [x] **Main entry point** — Boot sequence, creates Game, starts match, exposes debug global
 
-### Written But Not Wired In
+### Wired Into Game Loop
 
-- [ ] **A* pathfinding** — Grid-based on 50px cells, 8-directional, path smoothing (in Movement.ts)
-- [ ] **Detection system** — Vision cone, LOS raycasting, probabilistic detection per tick (in Detection.ts)
-- [ ] **Combat system** — Full engagement resolution with all 10 stat modifiers (in Combat.ts)
-- [ ] **ClientSoldier class** — Wraps stats + state, delegates to StatFormulas (in Soldier.ts)
+- [x] **A* pathfinding** — Grid-based on 50px cells, 8-directional, path smoothing. Used for all MOVE/RUSH commands.
+- [x] **Stat-driven movement** — Speed from `calculateMovementSpeed(SPD, weaponSpeedMod, armorPenalty)`. Combat suppression at 50%.
+- [x] **Detection system** — Vision cone (120°) + peripheral (30°) + LOS raycasting + probabilistic detection per tick using AWR/STL stats. Persistence prevents flicker.
+- [x] **Combat system** — Full stat-driven firefights: ACC→hit chance, distance mod, weapon mod, spray decay (RCL), composure (CMP), clutch (CLT), teamwork (TWK). Hit location (head/body/legs). Damage with armor/helmet. Kill logging.
+- [x] **Round-end detection** — All attackers or defenders eliminated → winner declared, economy updated, round advances.
+- [x] **RuntimeStats** — Each soldier has 10 stats (ACC, REA, SPD, STL, AWR, RCL, CMP, CLT, UTL, TWK) with varied profiles per index.
+- [x] **ClientSoldier class** — Wraps stats + state, delegates to StatFormulas (in Soldier.ts, not used by Game.ts but compiles)
 
 ### In Progress
 
@@ -61,7 +64,7 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 - [x] ~~Client GameState.ts defines its own enums~~ — Now imports/re-exports from shared types
 - [x] ~~Import paths inconsistent~~ — All now use `@shared/` aliases
 - [x] ~~npm install hasn't been run~~ — Dependencies installed, Vite serves the game
-- [ ] Simulation files (Soldier.ts, Movement.ts, Detection.ts, Combat.ts) have type mismatches with shared interfaces — will fix during wiring tasks
+- [x] ~~Simulation files have type mismatches~~ — Soldier.ts and Combat.ts rewritten to match shared interfaces
 
 ---
 

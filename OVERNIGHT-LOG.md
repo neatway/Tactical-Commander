@@ -1,5 +1,62 @@
 # Overnight Build Log
 
+## Session 2 — Wire Movement + Detection + Combat (2026-02-18)
+
+### What was done this session
+
+1. **Wire stat-driven movement (COMPLETE)**
+   - Added `RuntimeStats` interface to `GameState.ts` with all 10 abbreviated stats (ACC, REA, SPD, STL, AWR, RCL, CMP, CLT, UTL, TWK)
+   - Added `stats`, `detectedEnemies`, `shotsFired` fields to `SoldierRuntimeState`
+   - Created `createVariedStats()` factory — each soldier index gets a unique stat profile (Entry Fragger, Support, AWPer, Lurker, Anchor)
+   - Changed `primaryWeapon: string` to `currentWeapon: WeaponId` for proper weapon lookup
+   - Added `currentRoundKills` to `GameState` for kill tracking
+   - Replaced hardcoded `speed = 200` with `calculateMovementSpeed(SPD, weaponSpeedMod, armorPenalty)`
+   - Soldiers in combat move at 50% speed (suppression effect)
+
+2. **Wire detection system (COMPLETE)**
+   - `DetectionSystem` instantiated from map walls in `startMatch()`
+   - `updateDetection()` runs each tick: vision cone → LOS → probabilistic roll using AWR/STL stats
+   - Once detected, enemies stay visible as long as LOS is maintained (prevents detection flicker)
+   - Soldiers auto-face nearest detected enemy when standing still
+   - Both teams run detection against each other independently
+
+3. **Wire combat system (COMPLETE)**
+   - `updateCombat()` runs each tick after detection
+   - Full stat-driven combat pipeline: ACC → base hit, distance mod, weapon accuracy mod, movement penalty, spray degradation (RCL), composure (CMP), clutch (CLT), teamwork (TWK)
+   - Hit location system: head/body/legs with ACC-based headshot chance
+   - Damage calculation uses weapon data, armor reduction, helmet protection, AWP helmet bypass
+   - Kill logging with killer, victim, weapon, headshot flag, tick number
+   - Round-end detection: all attackers or all defenders eliminated → winner declared
+   - Mutual detection = both fire; one-sided detection = ambush advantage
+
+4. **Fixed Soldier.ts and Combat.ts compilation (COMPLETE)**
+   - Rewrote both files to match shared `SoldierStats` interface (full names: accuracy, reactionTime, etc.)
+   - These files are not currently used by Game.ts (all combat is inline) but now compile cleanly
+   - Will be useful for future server-side simulation and unit testing
+
+5. **Fixed HUD.ts (COMPLETE)**
+   - Updated reference from `soldier.primaryWeapon` to `soldier.currentWeapon`
+
+6. **Zero TypeScript errors, production build succeeds**
+
+### What needs to happen next (IN THIS ORDER)
+1. **Basic AI opponent** — Bot that moves soldiers toward objectives and responds to detection/combat
+2. **Buy menu UI** — HTML overlay for purchasing weapons/armor/utility
+3. **Utility system** — Smoke, flash, frag, molotov, decoy with area effects
+4. **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
+5. **Fog of war** — Texture-based visibility masking
+
+### Important notes
+- ALL CODE MUST BE THOROUGHLY COMMENTED — critical requirement from the project owner
+- The `RuntimeStats` (client-side, abbreviated) vs `SoldierStats` (shared, full names) split is intentional:
+  - `RuntimeStats` in `GameState.ts` uses abbreviations (ACC, REA, SPD) for simulation formulas
+  - `SoldierStats` in `shared/types/SoldierTypes.ts` uses full names (accuracy, reactionTime, movementSpeed) for persistence
+  - When the roster/meta-game is built, we'll map from full names → abbreviated names
+- Combat is per-tick (not per-engagement): each tick, detected enemies exchange fire
+- SeededRandom is initialized from `matchSeed` for deterministic replay
+
+---
+
 ## Session 1 — Integration Pass + Wiring (2026-02-18)
 
 ### What was done this session
@@ -24,28 +81,10 @@
    - Camera pan/zoom works, soldier selection works, click-to-move works
    - Phase timer ticks: BUY → STRATEGY → LIVE → ROUND_END
 
-3. **Currently working on: Wire pathfinding**
-   - Simulation files still have type errors (SoldierStats uses short names like `ACC`, `REA`
-     but the shared type uses full names like `accuracy`, `reaction`)
-   - Will rewrite simulation files to match shared interfaces during wiring
-
-### What needs to happen next (IN THIS ORDER)
-1. **Wire pathfinding** — Rewrite Movement.ts to match shared interfaces, integrate A* into Game.ts
-2. **Wire detection** — Rewrite Detection.ts, integrate into simulation tick loop
-3. **Wire combat** — Rewrite Combat.ts, integrate stat-driven firefights
-4. **Basic AI opponent** — Bot that moves soldiers and responds to contact
-5. **Buy menu UI** — HTML overlay for purchasing weapons/armor/utility
-6. **Utility system** — Smoke, flash, frag, molotov, decoy with area effects
-7. **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
-8. **Fog of war** — Texture-based visibility masking
-
-### Important notes
-- ALL CODE MUST BE THOROUGHLY COMMENTED — critical requirement from the project owner
-- Simulation files (Soldier.ts, Movement.ts, Detection.ts, Combat.ts) need substantial
-  rewrites to match the shared type interfaces before they can be wired in
-- The shared SoldierStats type uses full names (accuracy, reaction, speed, stealth, etc.)
-  but the simulation code uses abbreviations (ACC, REA, SPD, STL) — need to reconcile
-- Read PROGRESS.md for full milestone breakdown and file inventory
+3. **A* pathfinding wired (COMPLETE)**
+   - MovementSystem generates nav grid from map walls
+   - Click-to-move uses A* pathfinding + path smoothing
+   - Soldiers navigate around walls and obstacles
 
 ---
 

@@ -4,12 +4,17 @@
  * Re-exports shared enums (GamePhase, Side) from the shared types module
  * and defines client-specific runtime state interfaces. The state is updated
  * every tick during the live phase and between phases.
+ *
+ * Each soldier carries a RuntimeStats block (the 10 core stats abbreviated
+ * ACC, REA, SPD, STL, AWR, RCL, CMP, CLT, UTL, TWK) that feed directly
+ * into the StatFormulas calculations for movement, detection, and combat.
  */
 
 // Re-export shared enums so other client files can import from one place
 import { GamePhase, Side } from '@shared/types/GameTypes';
+import { WeaponId } from '@shared/types/WeaponTypes';
 import type { Stance } from '@shared/types/SoldierTypes';
-export { GamePhase, Side };
+export { GamePhase, Side, WeaponId };
 export type { Stance };
 
 // ============================================================
@@ -22,6 +27,35 @@ export interface Position {
   x: number;
   /** Vertical position in world units (depth in top-down view) */
   z: number;
+}
+
+/**
+ * RuntimeStats: the 10 core soldier stats used by all simulation formulas.
+ * These map directly to the StatFormulas function parameters.
+ * Abbreviated names match the design document (ACC, REA, SPD, etc.).
+ * Each stat ranges from 1-100 (see SOLDIER constants in GameConstants.ts).
+ */
+export interface RuntimeStats {
+  /** Accuracy — hit probability per shot */
+  ACC: number;
+  /** Reaction Time — who fires first in encounters */
+  REA: number;
+  /** Movement Speed — traversal speed on map */
+  SPD: number;
+  /** Stealth — reduces enemy detection radius */
+  STL: number;
+  /** Awareness — detection radius, vision quality */
+  AWR: number;
+  /** Recoil Control — accuracy decay during sustained fire */
+  RCL: number;
+  /** Composure — stat retention under pressure (low HP, outnumbered) */
+  CMP: number;
+  /** Clutch Factor — stat bonus when last alive */
+  CLT: number;
+  /** Utility Usage — grenade accuracy, flash duration, smoke density */
+  UTL: number;
+  /** Teamwork — bonus near allies, trade-kill speed */
+  TWK: number;
 }
 
 /** Complete state of a single soldier during a round */
@@ -38,8 +72,8 @@ export interface SoldierRuntimeState {
   health: number;
   /** Whether the soldier is still alive this round */
   alive: boolean;
-  /** Currently equipped primary weapon (null if none bought) */
-  primaryWeapon: string | null;
+  /** Currently equipped weapon ID (defaults to PISTOL) */
+  currentWeapon: WeaponId;
   /** Armor type equipped (null if none) */
   armor: string | null;
   /** Whether the soldier has a helmet */
@@ -66,6 +100,12 @@ export interface SoldierRuntimeState {
   isDefusing: boolean;
   /** Progress of plant/defuse action (0 to required time in seconds) */
   actionProgress: number;
+  /** The 10 core combat stats used by simulation formulas */
+  stats: RuntimeStats;
+  /** IDs of enemies this soldier currently detects (updated each tick) */
+  detectedEnemies: string[];
+  /** Number of consecutive shots fired in current engagement (for spray decay) */
+  shotsFired: number;
 }
 
 /** Economy state for one team */
@@ -150,6 +190,64 @@ export interface GameState {
   roundHistory: RoundResult[];
   /** The RNG seed for this match (ensures deterministic simulation) */
   matchSeed: number;
+  /** Kill log for the current round (flushed to RoundResult on round end) */
+  currentRoundKills: KillRecord[];
+}
+
+// ============================================================
+// Default Soldier Stats
+// ============================================================
+
+/**
+ * Creates default stats for a soldier (all stats at 50 — the baseline).
+ * In the full meta-game, each soldier will have unique stats based on
+ * their profile and rarity. For the prototype, everyone gets 50s.
+ *
+ * @returns A RuntimeStats object with all stats set to 50
+ */
+export function createDefaultStats(): RuntimeStats {
+  return {
+    ACC: 50,
+    REA: 50,
+    SPD: 50,
+    STL: 50,
+    AWR: 50,
+    RCL: 50,
+    CMP: 50,
+    CLT: 50,
+    UTL: 50,
+    TWK: 50,
+  };
+}
+
+/**
+ * Creates varied stats for testing purposes. Each soldier index (0-4) gets
+ * a different stat profile to make combat outcomes more interesting:
+ *   0: Entry Fragger — high ACC, REA, low STL
+ *   1: Support — high UTL, TWK, balanced
+ *   2: AWPer — very high ACC, low SPD
+ *   3: Lurker — high STL, AWR, CLT
+ *   4: Anchor — high CMP, RCL, AWR
+ *
+ * @param index - Soldier index (0-4), determines the stat profile
+ * @returns A RuntimeStats object with role-appropriate stat distribution
+ */
+export function createVariedStats(index: number): RuntimeStats {
+  const profiles: RuntimeStats[] = [
+    /* 0: Entry Fragger — fast reactions, accurate, not stealthy */
+    { ACC: 65, REA: 70, SPD: 60, STL: 30, AWR: 50, RCL: 55, CMP: 55, CLT: 40, UTL: 35, TWK: 45 },
+    /* 1: Support — good utility and teamwork, balanced combat */
+    { ACC: 45, REA: 45, SPD: 50, STL: 45, AWR: 55, RCL: 45, CMP: 50, CLT: 35, UTL: 70, TWK: 65 },
+    /* 2: AWPer — amazing aim, poor mobility */
+    { ACC: 75, REA: 60, SPD: 35, STL: 40, AWR: 55, RCL: 50, CMP: 60, CLT: 45, UTL: 30, TWK: 40 },
+    /* 3: Lurker — stealthy, aware, clutch performer */
+    { ACC: 50, REA: 55, SPD: 55, STL: 75, AWR: 65, RCL: 40, CMP: 50, CLT: 70, UTL: 35, TWK: 25 },
+    /* 4: Anchor — composed, good recoil control, aware */
+    { ACC: 55, REA: 45, SPD: 40, STL: 50, AWR: 65, RCL: 70, CMP: 70, CLT: 40, UTL: 40, TWK: 55 },
+  ];
+
+  /* Return the profile for this index, or defaults if index is out of range */
+  return { ...(profiles[index] ?? createDefaultStats()) };
 }
 
 // ============================================================
@@ -180,6 +278,7 @@ export function createInitialGameState(matchSeed: number): GameState {
     tick: 0,
     roundHistory: [],
     matchSeed,
+    currentRoundKills: [],
   };
 }
 
@@ -197,7 +296,7 @@ export function createInitialEconomy(): TeamEconomy {
 
 /**
  * Creates the initial runtime state for a soldier at the start of a round.
- * Soldiers spawn with full health, default pistol, no waypoints.
+ * Soldiers spawn with full health, default pistol, varied stats, no waypoints.
  * @param index - Soldier's index in the team (0-4)
  * @param soldierId - Reference to persistent soldier data
  * @param spawnPosition - Where to place the soldier in the spawn zone
@@ -214,7 +313,7 @@ export function createSoldierRuntimeState(
     rotation: 0,
     health: 100,
     alive: true,
-    primaryWeapon: null,
+    currentWeapon: WeaponId.PISTOL,
     armor: null,
     helmet: false,
     utility: [],
@@ -228,5 +327,8 @@ export function createSoldierRuntimeState(
     isPlanting: false,
     isDefusing: false,
     actionProgress: 0,
+    stats: createVariedStats(index),
+    detectedEnemies: [],
+    shotsFired: 0,
   };
 }

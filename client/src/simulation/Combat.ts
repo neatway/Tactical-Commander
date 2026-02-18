@@ -1,9 +1,14 @@
 /**
  * @file Combat.ts
- * @description Combat resolution system - the core of the tactical game.
- * Handles engagement resolution when two soldiers detect each other,
- * including reaction times, shot accuracy, hit location determination,
- * damage calculation, and sustained fire (spray) mechanics.
+ * @description Combat resolution system — the core of the tactical game.
+ *
+ * NOTE: This class is NOT currently used in the main game loop.
+ * The Game.ts simulation tick handles combat resolution directly using
+ * SoldierRuntimeState objects and StatFormulas. This standalone class
+ * is preserved for future use when:
+ *   - Server-side simulation needs a combat resolver
+ *   - Unit testing combat formulas in isolation
+ *   - A replay verification system needs to replay engagements
  *
  * Combat Flow:
  * 1. Two soldiers detect each other (via DetectionSystem)
@@ -11,13 +16,11 @@
  * 3. Each shot is resolved: hit/miss, location (head/body/legs), damage
  * 4. If the first shooter kills the target, combat ends
  * 5. If not, the other soldier fires back
- * 6. For sustained fire, resolveSustainedFire() handles spray degradation
  *
  * All random values come from SeededRandom for deterministic replay.
  * All formulas reference the shared StatFormulas module.
  */
 
-import type { Vec2 } from "@shared/util/MathUtils";
 import {
   calculateReactionTime,
   calculateBaseHitChance,
@@ -31,7 +34,6 @@ import {
 } from "@shared/constants/StatFormulas";
 import { distance } from "@shared/util/MathUtils";
 import { SeededRandom } from "@shared/util/RandomUtils";
-import { SIMULATION } from "@shared/constants/GameConstants";
 import type { ClientSoldier } from "./Soldier";
 
 // ============================================================================
@@ -51,9 +53,9 @@ export interface ShotResult {
   hit: boolean;
   /** Where the shot landed (null if missed) */
   location: "head" | "body" | "legs" | null;
-  /** Damage dealt to the targets health (0 if missed) */
+  /** Damage dealt to the target's health (0 if missed) */
   damage: number;
-  /** Targets health after this shot */
+  /** Target's health after this shot */
   targetHealthAfter: number;
   /** Whether this shot killed the target */
   killed: boolean;
@@ -74,17 +76,17 @@ export interface EngagementResult {
   /** Total damage dealt by each soldier: { soldierId: totalDamage } */
   damageDealt: Record<string, number>;
 }
+
 // ============================================================================
 // --- CombatSystem Class ---
 // ============================================================================
 
 /**
  * Resolves combat engagements between soldiers.
- * Stateless - all state is passed via parameters.
+ * Stateless — all state is passed via parameters.
  * Uses SeededRandom for all random outcomes to ensure determinism.
  *
- * @example
- * 
+ * NOTE: Not wired into the main game loop. See file header.
  */
 export class CombatSystem {
 
@@ -95,27 +97,11 @@ export class CombatSystem {
   /**
    * Resolve a full engagement between two soldiers who have detected each other.
    *
-   * This is the main combat function implementing the design doc formulas:
-   *
    * Step 1: Calculate reaction times for both soldiers.
-   *   Uses calculateReactionTime(REA stat, random variance).
-   *   Lower reaction time = fires first.
-   *
-   * Step 2: Determine firing order.
-   *   If reaction times are within 50ms: SIMULTANEOUS (both fire at once).
-   *   Otherwise: faster soldier fires first, slower fires second (if alive).
-   *
-   * Step 3: Resolve the first shooters shot.
-   *   Calculate final hit chance using the full accuracy pipeline.
-   *   Apply composure, clutch, and teamwork modifiers.
-   *   Roll hit/miss, determine hit location, calculate damage.
-   *
-   * Step 4: If target survived (and not simultaneous), target fires back.
-   *   Same accuracy and damage pipeline.
-   *
-   * Step 5: If simultaneous, both shots are resolved independently.
-   *   Both soldiers fire regardless of whether the other shot kills them.
-   *
+   * Step 2: Determine firing order (lower reaction time fires first).
+   * Step 3: Resolve the first shooter's shot.
+   * Step 4: If target survived and not simultaneous, target fires back.
+   * Step 5: If simultaneous, both fire regardless.
    * Step 6: Package and return the EngagementResult.
    *
    * @param soldierA - First soldier in the engagement
@@ -140,24 +126,26 @@ export class CombatSystem {
 
     // --- Step 1: Calculate reaction times ---
     /**
-     * Each soldiers reaction time is based on their REA stat
+     * Each soldier's reaction time is based on their reactionTime stat
      * plus a small random variance (+/- 50ms) for unpredictability.
+     * calculateReactionTime expects (rea, rng_func) where rng_func returns [0,1).
      */
-    const reactionA = calculateReactionTime(soldierA.stats.REA, rng.next());
-    const reactionB = calculateReactionTime(soldierB.stats.REA, rng.next());
+    const reactionA = calculateReactionTime(
+      soldierA.stats.reactionTime,
+      () => rng.next()
+    );
+    const reactionB = calculateReactionTime(
+      soldierB.stats.reactionTime,
+      () => rng.next()
+    );
 
     // --- Step 2: Determine firing order ---
     /**
-     * If reaction times are within SIMULTANEOUS_THRESHOLD (50ms),
-     * both soldiers fire at the same time - neither gets an advantage.
+     * If reaction times are within 50ms, both fire simultaneously.
      */
     const reactionDiff = Math.abs(reactionA - reactionB);
     const isSimultaneous = reactionDiff <= 50;
 
-    /**
-     * Determine who fires first.
-     * Lower reaction time = faster = fires first.
-     */
     let firstShooter: ClientSoldier;
     let secondShooter: ClientSoldier;
     if (reactionA <= reactionB) {
@@ -167,28 +155,19 @@ export class CombatSystem {
       firstShooter = soldierB;
       secondShooter = soldierA;
     }
+
     // --- Step 3: First shooter fires ---
-    /**
-     * Resolve the first shooters shot using the full accuracy pipeline.
-     */
     const firstShot = this.resolveShot(firstShooter, secondShooter, rng);
     shots.push(firstShot);
     damageDealt[firstShooter.id] += firstShot.damage;
 
-    /* If the first shot killed the target, record the kill */
     if (firstShot.killed) {
       kills.push(secondShooter.id);
     }
 
     // --- Step 4 & 5: Second shooter fires (if applicable) ---
     if (isSimultaneous) {
-      /**
-       * SIMULTANEOUS ENGAGEMENT:
-       * Both soldiers fire at the same time. The second soldier fires
-       * regardless of whether the first shot killed them.
-       * This represents the reality that bullets fired simultaneously
-       * are already in flight before either impact lands.
-       */
+      /* Both fire regardless of whether the first shot killed them */
       const secondShot = this.resolveShot(secondShooter, firstShooter, rng);
       shots.push(secondShot);
       damageDealt[secondShooter.id] += secondShot.damage;
@@ -197,11 +176,7 @@ export class CombatSystem {
         kills.push(firstShooter.id);
       }
     } else if (secondShooter.isAlive()) {
-      /**
-       * SEQUENTIAL ENGAGEMENT:
-       * The second soldier fires back only if they survived the first shot.
-       * This is the reward for having a faster reaction time.
-       */
+      /* Sequential: second fires only if alive */
       const secondShot = this.resolveShot(secondShooter, firstShooter, rng);
       shots.push(secondShot);
       damageDealt[secondShooter.id] += secondShot.damage;
@@ -219,23 +194,14 @@ export class CombatSystem {
       damageDealt,
     };
   }
+
   // --------------------------------------------------------------------------
   // Single Shot Resolution (private helper)
   // --------------------------------------------------------------------------
 
   /**
    * Resolve a single shot from shooter to target.
-   * This is the core accuracy + damage pipeline:
-   *
-   * 1. Calculate base hit chance from ACC stat
-   * 2. Calculate final hit chance with distance, movement, stance modifiers
-   * 3. Apply composure modifier (clutch pressure)
-   * 4. Apply clutch modifier (low health adrenaline)
-   * 5. Apply teamwork modifier (nearby allies)
-   * 6. Roll hit/miss
-   * 7. If hit: determine location (head/body/legs)
-   * 8. Calculate damage based on weapon, location, and target armor
-   * 9. Apply damage to target
+   * Uses the full accuracy + damage pipeline with shared StatFormulas.
    *
    * @param shooter - The soldier firing
    * @param target - The soldier being fired at
@@ -247,55 +213,45 @@ export class CombatSystem {
     target: ClientSoldier,
     rng: SeededRandom
   ): ShotResult {
-    // --- Calculate final hit chance ---
-
-    /** Step 1: Base hit chance from ACC stat */
-    const baseHitChance = calculateBaseHitChance(shooter.stats.ACC);
-
-    /** Step 2: Apply distance, movement, and stance modifiers */
+    /* Step 1: Calculate final hit chance using StatFormulas */
     const dist = distance(shooter.position, target.position);
-    const weapon = shooter.currentWeapon === shooter.primaryWeapon.id
-      ? shooter.primaryWeapon
-      : shooter.secondaryWeapon;
+
+    /**
+     * calculateFinalHitChance(acc, distance, isMoving, weaponAccMod)
+     * Uses accuracy stat (full name) and computes base + distance + moving + weapon.
+     * TODO: Pass actual weapon accuracy modifier from WeaponData lookup.
+     */
     const finalHitChance = calculateFinalHitChance(
-      baseHitChance,
+      shooter.stats.accuracy,
       dist,
-      weapon.range,
       shooter.isMoving,
-      shooter.stance
+      1.0  /* Neutral weapon modifier as placeholder */
     );
 
-    /**
-     * Step 3: Apply composure modifier.
-     * In a clutch situation (no allies alive), high CMP helps maintain accuracy.
-     * TODO: Pass actual alive allies/enemies count from simulation state.
-     * For now, assume 0 allies and 1 enemy (worst case for composure).
-     */
-    const composureMod = calculateComposureModifier(shooter.stats.CMP, 0, 1);
+    /* Apply composure modifier (4 args: cmp, hp, enemiesVisible, alliesNearby) */
+    const composureMod = calculateComposureModifier(
+      shooter.stats.composure,
+      shooter.health,
+      1,  /* Assume 1 enemy visible */
+      0   /* Assume 0 allies nearby (worst case) */
+    );
 
-    /**
-     * Step 4: Apply clutch modifier.
-     * Low health can boost or penalize accuracy depending on CMP stat.
-     */
-    const clutchMod = calculateClutchModifier(shooter.stats.CMP, shooter.health);
+    /* Apply clutch modifier (last alive check) */
+    const clutchMod = calculateClutchModifier(shooter.stats.clutchFactor, 0);
 
-    /**
-     * Step 5: Apply teamwork modifier.
-     * Nearby allies provide a coordination bonus.
-     * TODO: Pass actual nearby ally count from simulation state.
-     */
-    const teamworkMod = calculateTeamworkModifier(shooter.stats.TWK, 0);
+    /* Apply teamwork modifier (boolean for ally within 300px) */
+    const teamworkMod = calculateTeamworkModifier(shooter.stats.teamwork, false);
 
-    /** Combine all modifiers with the final hit chance */
+    /** Combine all modifiers */
     const modifiedHitChance = Math.min(
       0.98,
       Math.max(0.02, finalHitChance * composureMod * clutchMod * teamworkMod)
     );
 
-    // --- Roll hit/miss ---
+    /* Roll hit/miss */
     const hitRoll = rng.next();
     const isHit = hitRoll < modifiedHitChance;
-    /* If the shot missed, return a miss result */
+
     if (!isHit) {
       return {
         shooterId: shooter.id,
@@ -308,13 +264,8 @@ export class CombatSystem {
       };
     }
 
-    // --- Determine hit location ---
-    /**
-     * Roll to determine where the shot landed.
-     * Headshot chance is based on shooters ACC stat.
-     * Remaining probability is split between body (80%) and legs (20%).
-     */
-    const headshotChance = calculateHeadshotChance(shooter.stats.ACC);
+    /* Determine hit location */
+    const headshotChance = calculateHeadshotChance(shooter.stats.accuracy);
     const locationRoll = rng.next();
 
     let hitLocation: "head" | "body" | "legs";
@@ -326,50 +277,38 @@ export class CombatSystem {
       hitLocation = "legs";
     }
 
-    // --- Calculate damage ---
-    /**
-     * Use the calculateDamage formula to determine health and armor damage.
-     * Factors in: weapon base damage, hit location, headshot multiplier,
-     * armor penetration, target armor, and helmet.
-     */
-    const damageResult = calculateDamage(
-      weapon.damage,
+    /* Calculate damage using the 7-argument calculateDamage function */
+    const damage = calculateDamage(
+      25,     /* weaponBodyDmg — pistol placeholder */
+      2.5,    /* headshotMult — pistol placeholder */
       hitLocation,
-      weapon.headshotMultiplier,
-      weapon.armorPenetration,
-      target.armor,
-      target.helmet
+      0,      /* armorBodyReduction (no armor placeholder) */
+      0,      /* armorLegReduction (no armor placeholder) */
+      target.helmet,
+      false   /* isAwp */
     );
 
-    // --- Apply damage to target ---
-    /** Reduce targets armor by armor damage */
-    target.armor = Math.max(0, target.armor - damageResult.armorDamage);
-
-    /** Apply health damage via the soldiers takeDamage method */
-    target.takeDamage(damageResult.healthDamage);
+    /* Apply damage to target */
+    target.takeDamage(damage);
 
     return {
       shooterId: shooter.id,
       targetId: target.id,
       hit: true,
       location: hitLocation,
-      damage: damageResult.healthDamage,
+      damage: damage,
       targetHealthAfter: target.health,
       killed: !target.isAlive(),
     };
   }
+
   // --------------------------------------------------------------------------
   // Sustained Fire (Spray) Resolution
   // --------------------------------------------------------------------------
 
   /**
    * Resolve a single shot during sustained automatic fire (spraying).
-   * Unlike the initial engagement shot, spray shots have degraded accuracy
-   * based on the shot number in the burst.
-   *
-   * This is called for each subsequent shot after the initial engagement.
-   * As shotNumber increases, accuracy decreases according to the weapons
-   * spray penalty and the shooters ACC stat.
+   * Accuracy degrades based on shot number and RCL stat.
    *
    * @param shooter - The soldier firing
    * @param target - The soldier being fired at
@@ -396,44 +335,40 @@ export class CombatSystem {
       };
     }
 
-    // --- Calculate spray accuracy ---
-    /**
-     * Get the current weapon and calculate degraded spray accuracy.
-     * The weapons sprayPenalty determines how fast accuracy drops.
-     * The shooters ACC stat mitigates the spray penalty.
-     */
-    const weapon = shooter.currentWeapon === shooter.primaryWeapon.id
-      ? shooter.primaryWeapon
-      : shooter.secondaryWeapon;
-
+    /* Calculate spray accuracy using StatFormulas */
+    const baseHit = calculateBaseHitChance(shooter.stats.accuracy);
     const sprayAcc = calculateSprayAccuracy(
-      weapon.baseAccuracy,
-      weapon.sprayPenalty,
+      baseHit,
       shotNumber,
-      shooter.stats.ACC
+      shooter.stats.recoilControl
     );
 
-    // --- Apply modifiers (same as initial shot) ---
+    /* Apply distance and movement modifiers */
     const dist = distance(shooter.position, target.position);
     const finalHitChance = calculateFinalHitChance(
-      sprayAcc,
+      shooter.stats.accuracy,
       dist,
-      weapon.range,
       shooter.isMoving,
-      shooter.stance
+      1.0  /* Neutral weapon modifier placeholder */
     );
 
-    /** Apply composure, clutch, and teamwork modifiers */
-    const composureMod = calculateComposureModifier(shooter.stats.CMP, 0, 1);
-    const clutchMod = calculateClutchModifier(shooter.stats.CMP, shooter.health);
-    const teamworkMod = calculateTeamworkModifier(shooter.stats.TWK, 0);
+    /* Use spray accuracy as a multiplier on final hit chance */
+    const sprayMult = baseHit > 0 ? sprayAcc / baseHit : 1.0;
+    const adjustedHit = finalHitChance * sprayMult;
+
+    /* Apply composure, clutch, and teamwork modifiers */
+    const composureMod = calculateComposureModifier(
+      shooter.stats.composure, shooter.health, 1, 0
+    );
+    const clutchMod = calculateClutchModifier(shooter.stats.clutchFactor, 0);
+    const teamworkMod = calculateTeamworkModifier(shooter.stats.teamwork, false);
 
     const modifiedHitChance = Math.min(
       0.98,
-      Math.max(0.02, finalHitChance * composureMod * clutchMod * teamworkMod)
+      Math.max(0.02, adjustedHit * composureMod * clutchMod * teamworkMod)
     );
 
-    // --- Roll hit/miss ---
+    /* Roll hit/miss */
     const hitRoll = rng.next();
     const isHit = hitRoll < modifiedHitChance;
 
@@ -449,13 +384,8 @@ export class CombatSystem {
       };
     }
 
-    // --- Determine hit location ---
-    /**
-     * During spray, headshot chance is reduced slightly
-     * because recoil makes precise aiming harder.
-     */
-    const baseHeadshotChance = calculateHeadshotChance(shooter.stats.ACC);
-    /** Reduce headshot chance by 30% for spraying */
+    /* Determine hit location (reduced headshot chance during spray) */
+    const baseHeadshotChance = calculateHeadshotChance(shooter.stats.accuracy);
     const sprayHeadshotChance = baseHeadshotChance * 0.7;
     const locationRoll = rng.next();
 
@@ -468,28 +398,25 @@ export class CombatSystem {
       hitLocation = "legs";
     }
 
-    // --- Calculate and apply damage ---
-    const damageResult = calculateDamage(
-      weapon.damage,
+    /* Calculate and apply damage */
+    const damage = calculateDamage(
+      25,     /* weaponBodyDmg placeholder */
+      2.5,    /* headshotMult placeholder */
       hitLocation,
-      weapon.headshotMultiplier,
-      weapon.armorPenetration,
-      target.armor,
-      target.helmet
+      0,      /* armorBodyReduction */
+      0,      /* armorLegReduction */
+      target.helmet,
+      false   /* isAwp */
     );
 
-    /** Reduce targets armor */
-    target.armor = Math.max(0, target.armor - damageResult.armorDamage);
-
-    /** Apply health damage */
-    target.takeDamage(damageResult.healthDamage);
+    target.takeDamage(damage);
 
     return {
       shooterId: shooter.id,
       targetId: target.id,
       hit: true,
       location: hitLocation,
-      damage: damageResult.healthDamage,
+      damage: damage,
       targetHealthAfter: target.health,
       killed: !target.isAlive(),
     };

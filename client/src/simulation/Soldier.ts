@@ -1,14 +1,19 @@
 /**
  * @file Soldier.ts
- * @description Client-side soldier entity class used in the game simulation.
- * Wraps the static Soldier data (name, stats, weapons) with mutable
- * runtime state (health, position, waypoints, combat status).
+ * @description Client-side soldier entity class for potential future use.
  *
- * This class provides convenience methods for querying soldier capabilities
- * (speed, detection, accuracy) by delegating to the StatFormulas module.
+ * NOTE: This class is NOT currently used in the main game loop.
+ * The Game.ts simulation tick operates directly on SoldierRuntimeState
+ * objects from GameState.ts, which carry RuntimeStats (abbreviated names).
  *
- * The ClientSoldier is the primary entity manipulated by the Movement,
- * Detection, and Combat systems during each simulation tick.
+ * This file wraps the persistent Soldier data (from shared/types/SoldierTypes)
+ * with mutable state. It will be useful when:
+ *   - Server-side simulation needs a soldier entity class
+ *   - The roster/meta-game system is implemented (persistent soldier profiles)
+ *
+ * The shared SoldierStats interface uses full names:
+ *   accuracy, reactionTime, movementSpeed, stealth, awareness,
+ *   recoilControl, composure, utilityUsage, clutchFactor, teamwork
  */
 
 import type {
@@ -18,6 +23,7 @@ import type {
   Stance,
 } from "@shared/types/SoldierTypes";
 import type { Vec2 } from "@shared/util/MathUtils";
+import type { UtilityType } from "@shared/types/WeaponTypes";
 
 import {
   calculateMovementSpeed,
@@ -31,14 +37,13 @@ import {
 // ============================================================================
 
 /**
- * Client-side soldier entity that combines static data with mutable state.
- * Used by all simulation systems (Movement, Detection, Combat) as the
- * primary unit of gameplay.
+ * Client-side soldier entity that combines static profile data with mutable
+ * runtime state. Uses the shared SoldierStats interface (full stat names).
  *
- * @example
- * 
+ * NOTE: Not currently wired into the main game loop. See file header.
  */
-export class ClientSoldier {  // --------------------------------------------------------------------------
+export class ClientSoldier {
+  // --------------------------------------------------------------------------
   // Properties - matching SoldierState interface fields
   // --------------------------------------------------------------------------
 
@@ -60,14 +65,14 @@ export class ClientSoldier {  // -----------------------------------------------
   /** ID of the currently equipped weapon */
   public currentWeapon: string;
 
-  /** Current armor value (0-100). Absorbs a portion of incoming damage. */
-  public armor: number;
+  /** Current armor type (null if unarmored) */
+  public armor: string | null;
 
   /** Whether the soldier has a helmet (reduces headshot damage) */
   public helmet: boolean;
 
   /** Array of utility items (grenades, smokes, etc.) the soldier carries */
-  public utility: UtilityItem[];
+  public utility: UtilityType[];
 
   /** Current stance affecting speed, accuracy, and visibility */
   public stance: Stance;
@@ -91,25 +96,20 @@ export class ClientSoldier {  // -----------------------------------------------
   // Static data references (do not change during a round)
   // --------------------------------------------------------------------------
 
-  /** Reference to the soldiers base stats (ACC, SPD, AWR, etc.) */
+  /** Reference to the soldier's base stats (full names: accuracy, reactionTime, etc.) */
   public readonly stats: SoldierStats;
 
   /** Reference to the static soldier profile (name, team, weapons) */
   public readonly soldierData: Soldier;
 
-  /** The soldiers primary weapon data */
-  public readonly primaryWeapon: Weapon;
-
-  /** The soldiers secondary weapon data */
-  public readonly secondaryWeapon: Weapon;
   // --------------------------------------------------------------------------
   // Constructor
   // --------------------------------------------------------------------------
 
   /**
-   * Create a new ClientSoldier from static data and initial state.
+   * Create a new ClientSoldier from static profile data and initial state.
    *
-   * @param soldier - The static soldier profile (name, team, stats, weapons).
+   * @param soldier - The static soldier profile (name, team, stats).
    *                   This data never changes during a round.
    * @param initialState - The initial mutable state (position, health, etc.).
    *                       Typically generated at the start of a round.
@@ -118,11 +118,9 @@ export class ClientSoldier {  // -----------------------------------------------
     /* Store reference to the immutable soldier profile */
     this.soldierData = soldier;
     this.stats = soldier.stats;
-    this.primaryWeapon = soldier.primaryWeapon;
-    this.secondaryWeapon = soldier.secondaryWeapon;
 
     /* Initialize all mutable state from the provided initial state */
-    this.id = initialState.id;
+    this.id = initialState.soldierId;
     this.position = { ...initialState.position };  /* Clone to avoid shared reference */
     this.rotation = initialState.rotation;
     this.health = initialState.health;
@@ -142,58 +140,49 @@ export class ClientSoldier {  // -----------------------------------------------
   // --------------------------------------------------------------------------
   // Stat Query Methods
   // Delegate to StatFormulas for actual calculations.
+  // These use the full stat names from the shared SoldierStats interface.
   // --------------------------------------------------------------------------
 
   /**
-   * Calculate the soldiers current movement speed in game units per second.
-   * Takes into account the SPD stat, currently equipped weapons speed modifier,
-   * and whether the soldier is wearing armor.
+   * Calculate the soldier's current movement speed in game units per second.
+   * Uses the movementSpeed stat, weapon speed modifier, and armor penalty.
    *
+   * @param weaponSpeedMod - The current weapon's speed modifier (from WeaponData)
+   * @param armorPenalty - Armor speed penalty multiplier (1.0 if no armor)
    * @returns Movement speed in game units per second
    */
-  getSpeed(): number {
-    /* Look up the current weapons speed modifier */
-    const weapon = this.currentWeapon === this.primaryWeapon.id
-      ? this.primaryWeapon
-      : this.secondaryWeapon;
-    const weaponSpeedMod = weapon.speedModifier;
-
-    /* Armor check: soldier has armor if armor value > 0 */
-    const hasArmor = this.armor > 0;
-
-    /* Delegate to the shared formula */
-    return calculateMovementSpeed(this.stats.SPD, weaponSpeedMod, hasArmor);
+  getSpeed(weaponSpeedMod: number = 0.95, armorPenalty: number = 1.0): number {
+    return calculateMovementSpeed(this.stats.movementSpeed, weaponSpeedMod, armorPenalty);
   }
 
   /**
-   * Get the soldiers detection radius - how far they can spot enemies.
-   * Based on the AWR (awareness) stat.
+   * Get the soldier's detection radius based on the awareness stat.
    *
    * @returns Detection radius in game units
    */
   getDetectionRadius(): number {
-    return calculateDetectionRadius(this.stats.AWR);
+    return calculateDetectionRadius(this.stats.awareness);
   }
 
   /**
-   * Get the soldiers stealth modifier - how hard they are to detect.
-   * Based on the STL (stealth) stat. Lower = stealthier.
+   * Get the soldier's stealth modifier based on the stealth stat.
+   * Lower = stealthier (harder to detect).
    *
-   * @returns Stealth modifier (0.4 to 1.0)
+   * @returns Stealth modifier (0.5 to 1.0)
    */
   getStealthMod(): number {
-    return calculateStealthModifier(this.stats.STL);
+    return calculateStealthModifier(this.stats.stealth);
   }
 
   /**
-   * Get the soldiers base hit chance for the first shot.
-   * Based on the ACC (accuracy) stat.
+   * Get the soldier's base hit chance based on the accuracy stat.
    *
-   * @returns Base hit probability (0.30 to 0.95)
+   * @returns Base hit probability (0.157 to 0.85)
    */
   getBaseHitChance(): number {
-    return calculateBaseHitChance(this.stats.ACC);
+    return calculateBaseHitChance(this.stats.accuracy);
   }
+
   // --------------------------------------------------------------------------
   // State Query Methods
   // --------------------------------------------------------------------------
@@ -219,7 +208,6 @@ export class ClientSoldier {  // -----------------------------------------------
    * @param amount - The amount of health damage to apply (positive number)
    */
   takeDamage(amount: number): void {
-    /* Reduce health by the damage amount */
     this.health -= amount;
 
     /* Clamp health to minimum of 0 */
@@ -239,7 +227,7 @@ export class ClientSoldier {  // -----------------------------------------------
 
   /**
    * Get the next waypoint the soldier should move toward.
-   * Returns null if the waypoint queue is empty (soldier has nowhere to go).
+   * Returns null if the waypoint queue is empty.
    *
    * @returns The next waypoint position, or null if no waypoints remain
    */
@@ -252,8 +240,6 @@ export class ClientSoldier {  // -----------------------------------------------
 
   /**
    * Remove the first waypoint from the queue, advancing to the next one.
-   * Called when the soldier has reached the current waypoint (within
-   * the arrival distance threshold).
    */
   advanceWaypoint(): void {
     if (this.waypoints.length > 0) {
@@ -275,7 +261,7 @@ export class ClientSoldier {  // -----------------------------------------------
   // --------------------------------------------------------------------------
 
   /**
-   * Change the soldiers stance. Stance affects movement speed,
+   * Change the soldier's stance. Stance affects movement speed,
    * accuracy, and how visible the soldier is to enemies.
    *
    * @param newStance - The stance to switch to
@@ -296,13 +282,13 @@ export class ClientSoldier {  // -----------------------------------------------
    */
   toState(): SoldierState {
     return {
-      id: this.id,
+      soldierId: this.id,
       position: { ...this.position },
       rotation: this.rotation,
       health: this.health,
       alive: this.alive,
-      currentWeapon: this.currentWeapon,
-      armor: this.armor,
+      currentWeapon: this.currentWeapon as any,
+      armor: this.armor as any,
       helmet: this.helmet,
       utility: [...this.utility],
       stance: this.stance,

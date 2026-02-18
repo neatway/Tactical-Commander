@@ -7,6 +7,13 @@
  *
  * The game loop runs at 60fps for rendering, but the simulation ticks
  * at 5 ticks/second (200ms intervals) matching the server tick rate.
+ *
+ * Simulation tick order (each 200ms):
+ *   1. Process ready commands
+ *   2. Update movement (A* pathfinding + stat-driven speed)
+ *   3. Run detection (vision cone + LOS + probabilistic detection)
+ *   4. Run combat resolution (stat-driven firefights)
+ *   5. Check round end conditions (elimination, timer)
  */
 
 import * as THREE from 'three';
@@ -17,16 +24,46 @@ import { CameraController } from '../rendering/Camera';
 import { InputManager, MouseButton } from './InputManager';
 import { CommandSystem, CommandType } from './CommandSystem';
 import { MovementSystem } from '../simulation/Movement';
+import { DetectionSystem } from '../simulation/Detection';
 import { HUD } from '../ui/HUD';
 import {
   GamePhase,
   Side,
+  WeaponId,
   GameState,
   SoldierRuntimeState,
   Position,
+  KillRecord,
   createInitialGameState,
   createSoldierRuntimeState,
 } from './GameState';
+
+/* Shared stat formulas for simulation calculations */
+import {
+  calculateMovementSpeed,
+  calculateDetectionRadius,
+  calculateStealthModifier,
+  calculateBaseHitChance,
+  calculateFinalHitChance,
+  calculateHeadshotChance,
+  calculateDamage,
+  calculateSprayAccuracy,
+  calculateComposureModifier,
+  calculateClutchModifier,
+  calculateTeamworkModifier,
+  calculateReactionTime,
+} from '@shared/constants/StatFormulas';
+
+/* Weapon stat lookup table */
+import { WEAPONS } from '@shared/constants/WeaponData';
+
+/* Seeded PRNG for deterministic combat */
+import { SeededRandom } from '@shared/util/RandomUtils';
+
+/* Math utilities */
+import { distance as vecDistance } from '@shared/util/MathUtils';
+
+import type { Wall } from '@shared/types/MapTypes';
 
 // ============================================================
 // Constants
@@ -43,6 +80,12 @@ const PHASE_DURATIONS: Record<string, number> = {
   [GamePhase.POST_PLANT]: 40,    // Bomb timer
   [GamePhase.ROUND_END]: 5,      // Brief pause before next round
 };
+
+/**
+ * Distance threshold in pixels for the teamwork bonus.
+ * If an allied soldier is within this range, the TWK stat bonus activates.
+ */
+const TEAMWORK_RANGE = 300;
 
 // ============================================================
 // Game Class
@@ -76,6 +119,8 @@ export class Game {
   private commandSystem: CommandSystem;
   /** A* pathfinding system - created when the map loads */
   private movementSystem: MovementSystem | null = null;
+  /** Line-of-sight and enemy detection system - created when the map loads */
+  private detectionSystem: DetectionSystem | null = null;
   /** In-game HUD overlay showing score, timer, money, etc. */
   private hud: HUD;
 
@@ -86,6 +131,10 @@ export class Game {
   private localPlayer: 1 | 2 = 1;
   /** Currently selected soldier index (0-4) or null */
   private selectedSoldier: number | null = null;
+  /** Seeded random number generator for deterministic simulation */
+  private rng!: SeededRandom;
+  /** Map wall data (cached for LOS checks) */
+  private walls: Wall[] = [];
 
   // --- Timing ---
   /** Timestamp of the last frame (for delta time calculation) */
@@ -132,6 +181,9 @@ export class Game {
     /* Create initial game state with a random seed */
     this.state = createInitialGameState(Date.now());
 
+    /* Initialize the seeded RNG from the match seed */
+    this.rng = new SeededRandom(this.state.matchSeed);
+
     console.log('[Game] All systems initialized');
   }
 
@@ -151,9 +203,16 @@ export class Game {
     const { BAZAAR_MAP } = await import('../assets/maps/bazaar');
     this.mapRenderer.loadMap(BAZAAR_MAP);
 
+    /* Cache the wall data for LOS checks */
+    this.walls = BAZAAR_MAP.walls;
+
     /* Initialize pathfinding on the loaded map */
     this.movementSystem = new MovementSystem(BAZAAR_MAP);
     console.log('[Game] Pathfinding grid generated for Bazaar');
+
+    /* Initialize the detection system with the map walls */
+    this.detectionSystem = new DetectionSystem(BAZAAR_MAP.walls);
+    console.log('[Game] Detection system initialized');
 
     /* Update camera bounds to match loaded map */
     this.cameraController = new CameraController(
@@ -188,6 +247,8 @@ export class Game {
   /**
    * Spawn soldiers at their team's spawn zone.
    * Distributes 5 soldiers evenly within the spawn area.
+   * Attacker soldiers face right (toward defender side),
+   * defender soldiers face left (toward attacker side).
    */
   private spawnSoldiers(mapData: { spawnZones: { attacker: { x: number; z: number; width: number; height: number }; defender: { x: number; z: number; width: number; height: number } } }): void {
     const attackerSpawn = mapData.spawnZones.attacker;
@@ -205,6 +266,8 @@ export class Game {
       if (i === 0) {
         soldierState.hasBomb = true;
       }
+      /* Attackers face right (toward defenders) */
+      soldierState.rotation = 0;
       this.state.player1Soldiers.push(soldierState);
 
       /* Create visual representation */
@@ -219,6 +282,8 @@ export class Game {
         z: defenderSpawn.z + defenderSpawn.height / 2,
       };
       const soldierState = createSoldierRuntimeState(i, `p2_soldier_${i}`, pos);
+      /* Defenders face left (toward attackers) */
+      soldierState.rotation = Math.PI;
       this.state.player2Soldiers.push(soldierState);
 
       /* Create visual representation */
@@ -432,6 +497,13 @@ export class Game {
   /**
    * Run one simulation tick (every 200ms).
    * This is where game logic happens: movement, detection, combat.
+   *
+   * Tick order:
+   *   1. Process ready commands from the command queue
+   *   2. Update movement (A* + SPD stat)
+   *   3. Run detection (vision cone + LOS + AWR/STL stats)
+   *   4. Run combat resolution (ACC, REA, CMP, CLT, TWK stats)
+   *   5. Check round end conditions (all dead, timer expired)
    */
   private simulationTick(): void {
     this.state.tick++;
@@ -442,19 +514,23 @@ export class Game {
       return;
     }
 
-    /* Process ready commands from the command queue */
+    /* Step 1: Process ready commands from the command queue */
     const readyCommands = this.commandSystem.getReadyCommands(this.gameTime);
     for (const cmd of readyCommands) {
       this.executeCommand(cmd);
     }
 
-    /* Update soldier movement */
+    /* Step 2: Update soldier movement (stat-driven speed) */
     this.updateMovement();
 
-    /* TODO: Run detection system */
-    /* TODO: Run combat resolution */
-    /* TODO: Check bomb plant/defuse progress */
-    /* TODO: Check round end conditions */
+    /* Step 3: Run detection system (vision cone + LOS + probabilistic roll) */
+    this.updateDetection();
+
+    /* Step 4: Run combat resolution for soldiers that detect each other */
+    this.updateCombat();
+
+    /* Step 5: Check round end conditions */
+    this.checkRoundEndConditions();
   }
 
   /**
@@ -508,9 +584,16 @@ export class Game {
     }
   }
 
+  // ============================================================
+  // Movement System (Sim Step 2)
+  // ============================================================
+
   /**
-   * Update soldier positions based on their waypoints.
-   * Simple linear movement toward the next waypoint.
+   * Update soldier positions based on their waypoints and SPD stat.
+   *
+   * Uses calculateMovementSpeed() from StatFormulas with the soldier's
+   * SPD stat, current weapon speed modifier, and armor penalty.
+   * Soldiers in combat move at 50% speed (suppression effect).
    */
   private updateMovement(): void {
     const allSoldiers = [
@@ -518,7 +601,8 @@ export class Game {
       ...this.state.player2Soldiers,
     ];
 
-    const dt = TICK_RATE_MS / 1000; // Time per tick in seconds
+    /** Time per tick in seconds (0.2s at 5 ticks/sec) */
+    const dt = TICK_RATE_MS / 1000;
 
     for (const soldier of allSoldiers) {
       if (!soldier.alive || soldier.waypoints.length === 0) {
@@ -532,24 +616,577 @@ export class Game {
       const dz = target.z - soldier.position.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
 
-      /* Base movement speed (will use StatFormulas once available) */
-      const speed = 200; // pixels per second (placeholder - SPD=50 default)
+      /* --- Calculate stat-driven movement speed --- */
 
-      if (dist < 5) {
-        /* Close enough to waypoint - advance to next */
+      /** Look up the current weapon's speed modifier from WeaponData */
+      const weaponStats = WEAPONS[soldier.currentWeapon];
+      const weaponSpeedMod = weaponStats ? weaponStats.speedModifier : 0.95;
+
+      /**
+       * Armor speed penalty: heavy armor slows you down.
+       * TODO: Look up actual armor stats from WeaponData.ARMOR
+       * For now: no armor = 1.0, any armor = 0.95 (light) or 0.92 (heavy)
+       */
+      const armorPenalty = soldier.armor ? 0.95 : 1.0;
+
+      /**
+       * Calculate final movement speed using the StatFormulas function.
+       * Formula: BASE_SPEED * (0.5 + SPD/100) * weaponSpeedMod * armorPenalty
+       * At SPD=50, weaponMod=1.0, no armor: 200 * 1.0 * 1.0 * 1.0 = 200 px/s
+       */
+      let speed = calculateMovementSpeed(
+        soldier.stats.SPD,
+        weaponSpeedMod,
+        armorPenalty
+      );
+
+      /* Soldiers in combat move at 50% speed (suppression) */
+      if (soldier.isInCombat) {
+        speed *= 0.5;
+      }
+
+      /** Waypoint arrival threshold in game units */
+      const ARRIVAL_DIST = 5;
+
+      if (dist < ARRIVAL_DIST) {
+        /* Close enough to waypoint - snap to it and advance to next */
         soldier.position.x = target.x;
         soldier.position.z = target.z;
         soldier.waypoints.shift();
         soldier.isMoving = soldier.waypoints.length > 0;
       } else {
-        /* Move toward waypoint */
+        /* Move toward waypoint at calculated speed */
         const moveAmount = speed * dt;
         const ratio = Math.min(moveAmount / dist, 1);
         soldier.position.x += dx * ratio;
         soldier.position.z += dz * ratio;
+        /* Face movement direction */
         soldier.rotation = Math.atan2(dz, dx);
         soldier.isMoving = true;
       }
+    }
+  }
+
+  // ============================================================
+  // Detection System (Sim Step 3)
+  // ============================================================
+
+  /**
+   * Run the detection system for all alive soldiers.
+   *
+   * For each alive soldier, checks every alive enemy through the
+   * detection pipeline:
+   *   1. Range check (AWR stat → detection radius, enemy STL → stealth mod)
+   *   2. Vision cone (120° forward arc + 30° peripheral on each side)
+   *   3. Line of sight (ray vs walls)
+   *   4. Probabilistic detection roll (per tick)
+   *
+   * Results are stored in each soldier's `detectedEnemies` array.
+   * When a soldier detects an enemy, they automatically face toward them.
+   */
+  private updateDetection(): void {
+    if (!this.detectionSystem) return;
+
+    const p1Soldiers = this.state.player1Soldiers;
+    const p2Soldiers = this.state.player2Soldiers;
+
+    /* Run detection for player 1 soldiers against player 2 enemies */
+    this.detectEnemiesForTeam(p1Soldiers, p2Soldiers);
+
+    /* Run detection for player 2 soldiers against player 1 enemies */
+    this.detectEnemiesForTeam(p2Soldiers, p1Soldiers);
+  }
+
+  /**
+   * Run detection for all soldiers on one team against the enemy team.
+   * Updates each soldier's detectedEnemies array and facing direction.
+   *
+   * @param team - Array of friendly soldiers doing the detecting
+   * @param enemies - Array of enemy soldiers that might be detected
+   */
+  private detectEnemiesForTeam(
+    team: SoldierRuntimeState[],
+    enemies: SoldierRuntimeState[]
+  ): void {
+    if (!this.detectionSystem) return;
+
+    for (const soldier of team) {
+      /* Dead soldiers can't detect anyone */
+      if (!soldier.alive) {
+        soldier.detectedEnemies = [];
+        continue;
+      }
+
+      /* Check each alive enemy through the full detection pipeline */
+      const newDetected: string[] = [];
+
+      for (const enemy of enemies) {
+        if (!enemy.alive) continue;
+
+        /**
+         * Run the detection check from DetectionSystem.
+         * Uses the soldier's AWR stat for detection radius and
+         * the enemy's STL stat for stealth modifier.
+         */
+        const detected = this.detectionSystem.checkDetection(
+          soldier,
+          enemy,
+          this.rng,
+          soldier.stats.AWR,
+          enemy.stats.STL
+        );
+
+        if (detected) {
+          newDetected.push(enemy.soldierId);
+        }
+      }
+
+      /**
+       * Also keep previously detected enemies visible if they are still
+       * within LOS (prevents flickering from probabilistic detection).
+       * Once detected, a soldier stays visible until LOS is lost.
+       */
+      for (const prevId of soldier.detectedEnemies) {
+        /* Don't duplicate entries */
+        if (newDetected.includes(prevId)) continue;
+
+        /* Find the previously detected enemy */
+        const prevEnemy = enemies.find(e => e.soldierId === prevId);
+        if (!prevEnemy || !prevEnemy.alive) continue;
+
+        /* Keep them detected if we still have LOS */
+        if (this.detectionSystem.hasLineOfSight(soldier.position, prevEnemy.position)) {
+          /**
+           * Also verify they're still within detection range.
+           * Use a generous 1.2x multiplier to prevent edge-case flickering
+           * right at the boundary of the detection radius.
+           */
+          const baseRadius = calculateDetectionRadius(soldier.stats.AWR);
+          const stealthMod = calculateStealthModifier(prevEnemy.stats.STL);
+          const effectiveRadius = baseRadius * stealthMod * 1.2;
+          const dist = vecDistance(soldier.position, prevEnemy.position);
+
+          if (dist <= effectiveRadius) {
+            newDetected.push(prevId);
+          }
+        }
+      }
+
+      /* Update the soldier's detected enemies list */
+      soldier.detectedEnemies = newDetected;
+
+      /**
+       * If this soldier detects enemies and isn't currently moving,
+       * face toward the nearest detected enemy (auto-aim behavior).
+       */
+      if (newDetected.length > 0 && !soldier.isMoving) {
+        const nearestEnemy = this.findNearestDetectedEnemy(soldier, enemies);
+        if (nearestEnemy) {
+          const dx = nearestEnemy.position.x - soldier.position.x;
+          const dz = nearestEnemy.position.z - soldier.position.z;
+          soldier.rotation = Math.atan2(dz, dx);
+        }
+      }
+    }
+  }
+
+  /**
+   * Find the nearest detected enemy for a soldier.
+   * Used for auto-aiming when standing still.
+   *
+   * @param soldier - The observing soldier
+   * @param enemies - Array of enemy soldiers
+   * @returns The nearest detected enemy, or null
+   */
+  private findNearestDetectedEnemy(
+    soldier: SoldierRuntimeState,
+    enemies: SoldierRuntimeState[]
+  ): SoldierRuntimeState | null {
+    let nearest: SoldierRuntimeState | null = null;
+    let nearestDist = Infinity;
+
+    for (const enemy of enemies) {
+      if (!enemy.alive) continue;
+      if (!soldier.detectedEnemies.includes(enemy.soldierId)) continue;
+
+      const dist = vecDistance(soldier.position, enemy.position);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearest = enemy;
+      }
+    }
+
+    return nearest;
+  }
+
+  // ============================================================
+  // Combat System (Sim Step 4)
+  // ============================================================
+
+  /**
+   * Resolve combat between soldiers that mutually detect each other.
+   *
+   * Combat triggers when two soldiers detect each other (mutual detection).
+   * Each tick, combatants exchange fire with probabilities determined by:
+   *   - ACC → base hit chance
+   *   - REA → who fires first (reaction time)
+   *   - RCL → accuracy decay during sustained fire
+   *   - CMP → composure under pressure (low HP or outnumbered)
+   *   - CLT → clutch bonus when last alive
+   *   - TWK → teamwork bonus when allies are nearby
+   *
+   * Damage is calculated using the weapon's bodyDamage, headshotMultiplier,
+   * and the target's armor and helmet.
+   */
+  private updateCombat(): void {
+    const p1Soldiers = this.state.player1Soldiers;
+    const p2Soldiers = this.state.player2Soldiers;
+
+    /**
+     * Track which pairs have already been resolved this tick
+     * to prevent double-processing (A shoots B AND B shoots A).
+     */
+    const resolvedPairs = new Set<string>();
+
+    /* Check all player 1 soldiers for combat engagements */
+    for (const soldier of p1Soldiers) {
+      if (!soldier.alive) continue;
+
+      for (const enemyId of soldier.detectedEnemies) {
+        /* Find the enemy in player 2's roster */
+        const enemy = p2Soldiers.find(e => e.soldierId === enemyId);
+        if (!enemy || !enemy.alive) continue;
+
+        /* Create a unique key for this pair to prevent double-processing */
+        const pairKey = [soldier.soldierId, enemy.soldierId].sort().join(':');
+        if (resolvedPairs.has(pairKey)) continue;
+        resolvedPairs.add(pairKey);
+
+        /**
+         * Check for mutual detection — both soldiers see each other.
+         * If only one sees the other, the detected soldier gets a free
+         * "ambush" shot before the other reacts.
+         */
+        const mutualDetection = enemy.detectedEnemies.includes(soldier.soldierId);
+
+        /* Mark both as in combat */
+        soldier.isInCombat = true;
+        soldier.currentTarget = enemy.soldierId;
+        if (mutualDetection) {
+          enemy.isInCombat = true;
+          enemy.currentTarget = soldier.soldierId;
+        }
+
+        /* Resolve the exchange of fire */
+        this.resolveCombatTick(soldier, enemy, p1Soldiers, p2Soldiers, mutualDetection);
+      }
+    }
+
+    /* Also check player 2 soldiers for one-sided detection (ambushes) */
+    for (const soldier of p2Soldiers) {
+      if (!soldier.alive) continue;
+
+      for (const enemyId of soldier.detectedEnemies) {
+        const enemy = p1Soldiers.find(e => e.soldierId === enemyId);
+        if (!enemy || !enemy.alive) continue;
+
+        const pairKey = [soldier.soldierId, enemy.soldierId].sort().join(':');
+        if (resolvedPairs.has(pairKey)) continue;
+        resolvedPairs.add(pairKey);
+
+        /* One-sided detection: soldier sees enemy but enemy doesn't see soldier */
+        soldier.isInCombat = true;
+        soldier.currentTarget = enemy.soldierId;
+
+        this.resolveCombatTick(soldier, enemy, p2Soldiers, p1Soldiers, false);
+      }
+    }
+
+    /* Clear combat status for soldiers with no detected enemies */
+    for (const soldier of [...p1Soldiers, ...p2Soldiers]) {
+      if (!soldier.alive) continue;
+      if (soldier.detectedEnemies.length === 0) {
+        soldier.isInCombat = false;
+        soldier.currentTarget = null;
+        soldier.shotsFired = 0; /* Reset spray counter when not in combat */
+      }
+    }
+  }
+
+  /**
+   * Resolve one tick of combat between two soldiers.
+   *
+   * Uses the full stat-driven combat pipeline:
+   *   1. Calculate hit chance (ACC + distance + movement + weapon + modifiers)
+   *   2. Roll hit/miss
+   *   3. Determine hit location (head/body/legs)
+   *   4. Calculate damage (weapon + armor + helmet)
+   *   5. Apply damage
+   *
+   * If mutual detection, both fire. If one-sided, only the detecting
+   * soldier fires (ambush advantage).
+   *
+   * @param shooterA - First soldier (always fires)
+   * @param shooterB - Second soldier (fires only if mutualDetection)
+   * @param teamA - Shooter A's full team (for counting allies alive)
+   * @param teamB - Shooter B's full team (for counting allies alive)
+   * @param mutualDetection - Whether both soldiers see each other
+   */
+  private resolveCombatTick(
+    shooterA: SoldierRuntimeState,
+    shooterB: SoldierRuntimeState,
+    teamA: SoldierRuntimeState[],
+    teamB: SoldierRuntimeState[],
+    mutualDetection: boolean
+  ): void {
+    /* Resolve A shooting at B */
+    if (shooterA.alive && shooterB.alive) {
+      this.resolveShot(shooterA, shooterB, teamA, teamB);
+    }
+
+    /* Resolve B shooting at A (only if mutual detection and B is still alive) */
+    if (mutualDetection && shooterB.alive && shooterA.alive) {
+      this.resolveShot(shooterB, shooterA, teamB, teamA);
+    }
+  }
+
+  /**
+   * Resolve a single shot from one soldier at another.
+   * This is the core accuracy + damage pipeline from the GDD.
+   *
+   * Hit chance calculation:
+   *   1. Base hit = 0.15 + ACC * 0.007
+   *   2. Distance modifier = max(0.3, 1.0 - distance/1500)
+   *   3. Moving penalty = 0.5x if shooter is moving
+   *   4. Weapon accuracy modifier (from WeaponData)
+   *   5. Spray degradation (shots fired in burst → RCL mitigates)
+   *   6. Composure modifier (CMP under stress)
+   *   7. Clutch modifier (CLT when last alive)
+   *   8. Teamwork modifier (TWK with allies nearby)
+   *   → Final = clamp(product of all, 0.02, 0.98)
+   *
+   * @param shooter - The soldier firing
+   * @param target - The soldier being fired at
+   * @param shooterTeam - Shooter's full team (for counting allies)
+   * @param targetTeam - Target's full team
+   */
+  private resolveShot(
+    shooter: SoldierRuntimeState,
+    target: SoldierRuntimeState,
+    shooterTeam: SoldierRuntimeState[],
+    targetTeam: SoldierRuntimeState[]
+  ): void {
+    /* Increment shot counter for spray tracking */
+    shooter.shotsFired++;
+
+    /* --- Step 1: Base hit chance from ACC stat --- */
+    const baseHit = calculateBaseHitChance(shooter.stats.ACC);
+
+    /* --- Step 2: Apply distance modifier --- */
+    const dist = vecDistance(shooter.position, target.position);
+
+    /* --- Step 3: Get weapon stats --- */
+    const weaponStats = WEAPONS[shooter.currentWeapon];
+    const weaponAccMod = weaponStats ? weaponStats.accuracyModifier : 0.85;
+
+    /**
+     * Step 4: Calculate final hit chance using StatFormulas.
+     * Combines base accuracy, distance, movement penalty, and weapon modifier.
+     */
+    let hitChance = calculateFinalHitChance(
+      shooter.stats.ACC,
+      dist,
+      shooter.isMoving,
+      weaponAccMod
+    );
+
+    /**
+     * Step 5: Apply spray degradation for sustained fire.
+     * After the first shot, accuracy degrades based on shots fired
+     * and the soldier's RCL (Recoil Control) stat.
+     */
+    if (shooter.shotsFired > 1) {
+      const sprayAcc = calculateSprayAccuracy(
+        hitChance,
+        shooter.shotsFired,
+        shooter.stats.RCL
+      );
+      hitChance = sprayAcc;
+    }
+
+    /* --- Step 6: Composure modifier (CMP) --- */
+    /**
+     * Count alive allies and detected enemies for stress calculation.
+     * Stress triggers when: HP < 30 OR enemiesVisible > alliesNearby + 1
+     */
+    const alliesAlive = shooterTeam.filter(
+      s => s.alive && s.soldierId !== shooter.soldierId
+    ).length;
+    const enemiesDetected = shooter.detectedEnemies.length;
+
+    const composureMod = calculateComposureModifier(
+      shooter.stats.CMP,
+      shooter.health,
+      enemiesDetected,
+      alliesAlive
+    );
+    hitChance *= composureMod;
+
+    /* --- Step 7: Clutch modifier (CLT) --- */
+    /** Clutch activates when the soldier is the last one alive on their team */
+    const clutchMod = calculateClutchModifier(shooter.stats.CLT, alliesAlive);
+    hitChance *= clutchMod;
+
+    /* --- Step 8: Teamwork modifier (TWK) --- */
+    /** Check if any alive ally is within TEAMWORK_RANGE (300px) */
+    const hasAllyNearby = shooterTeam.some(ally => {
+      if (ally.soldierId === shooter.soldierId || !ally.alive) return false;
+      return vecDistance(shooter.position, ally.position) <= TEAMWORK_RANGE;
+    });
+    const teamworkMod = calculateTeamworkModifier(shooter.stats.TWK, hasAllyNearby);
+    hitChance *= teamworkMod;
+
+    /* --- Clamp final hit chance --- */
+    hitChance = Math.max(0.02, Math.min(0.98, hitChance));
+
+    /* --- Roll hit/miss --- */
+    const hitRoll = this.rng.next();
+    const isHit = hitRoll < hitChance;
+
+    if (!isHit) {
+      /* Shot missed — no damage */
+      return;
+    }
+
+    /* --- Determine hit location (head/body/legs) --- */
+    const headshotChance = calculateHeadshotChance(shooter.stats.ACC);
+
+    /** Reduce headshot chance during spray by 30% */
+    const effectiveHeadshotChance = shooter.shotsFired > 1
+      ? headshotChance * 0.7
+      : headshotChance;
+
+    const locationRoll = this.rng.next();
+    let hitLocation: 'head' | 'body' | 'legs';
+    if (locationRoll < effectiveHeadshotChance) {
+      hitLocation = 'head';
+    } else if (locationRoll < effectiveHeadshotChance + (1 - effectiveHeadshotChance) * 0.8) {
+      hitLocation = 'body';
+    } else {
+      hitLocation = 'legs';
+    }
+
+    /* --- Calculate damage --- */
+    /**
+     * Look up armor reduction values.
+     * TODO: Use actual ARMOR lookup table when buy menu is wired.
+     * For now: no armor = 0% reduction, "light" = 30%, "heavy" = 50%.
+     */
+    let armorBodyReduction = 0;
+    let armorLegReduction = 0;
+    if (target.armor === 'HEAVY_ARMOR') {
+      armorBodyReduction = 0.50;
+      armorLegReduction = 0.15;
+    } else if (target.armor === 'LIGHT_VEST') {
+      armorBodyReduction = 0.30;
+      armorLegReduction = 0;
+    }
+
+    /** Check if the weapon is an AWP (ignores helmet protection) */
+    const isAwp = shooter.currentWeapon === WeaponId.AWP;
+
+    const damage = calculateDamage(
+      weaponStats ? weaponStats.bodyDamage : 25,
+      weaponStats ? weaponStats.headshotMultiplier : 2.5,
+      hitLocation,
+      armorBodyReduction,
+      armorLegReduction,
+      target.helmet,
+      isAwp
+    );
+
+    /* --- Apply damage to target --- */
+    target.health -= damage;
+
+    /* Check if target was killed */
+    if (target.health <= 0) {
+      target.health = 0;
+      target.alive = false;
+      target.isMoving = false;
+      target.isInCombat = false;
+      target.currentTarget = null;
+      target.waypoints = [];
+      target.detectedEnemies = [];
+
+      /* Log the kill */
+      const killRecord: KillRecord = {
+        killerId: shooter.soldierId,
+        victimId: target.soldierId,
+        weapon: shooter.currentWeapon,
+        headshot: hitLocation === 'head',
+        tick: this.state.tick,
+      };
+      this.state.currentRoundKills.push(killRecord);
+
+      console.log(
+        `[Combat] ${shooter.soldierId} killed ${target.soldierId}` +
+        ` with ${shooter.currentWeapon}` +
+        `${hitLocation === 'head' ? ' (HEADSHOT!)' : ''}` +
+        ` — ${damage.toFixed(0)} damage`
+      );
+    }
+  }
+
+  // ============================================================
+  // Round End Conditions (Sim Step 5)
+  // ============================================================
+
+  /**
+   * Check if the round should end due to elimination.
+   *
+   * The round ends immediately when:
+   *   - All attackers are dead → Defenders win
+   *   - All defenders are dead → Attackers win
+   *
+   * Other round-end conditions (bomb plant/defuse, timer) are handled
+   * by the phase timer in advancePhase().
+   */
+  private checkRoundEndConditions(): void {
+    /* Don't check during non-live phases */
+    if (this.state.phase !== GamePhase.LIVE_PHASE && this.state.phase !== GamePhase.POST_PLANT) {
+      return;
+    }
+
+    /**
+     * Determine which team is attacking and which is defending.
+     * Player 1's side determines this — player 2 is always the opposite.
+     */
+    const attackers = this.state.player1Side === Side.ATTACKER
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+
+    const defenders = this.state.player1Side === Side.DEFENDER
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+
+    const attackersAlive = attackers.filter(s => s.alive).length;
+    const defendersAlive = defenders.filter(s => s.alive).length;
+
+    if (attackersAlive === 0) {
+      /* All attackers eliminated — defenders win */
+      console.log('[Round] All attackers eliminated! Defenders win.');
+      this.endRound(Side.DEFENDER);
+    } else if (defendersAlive === 0) {
+      /**
+       * All defenders eliminated — attackers win.
+       * Exception: if the bomb is planted, the round continues
+       * (bomb can still detonate even with no defenders alive).
+       * But if bomb is NOT planted and all defenders die, attackers
+       * still need to plant... Actually in CS:GO if all defenders die
+       * the attackers win immediately, regardless of bomb status.
+       */
+      console.log('[Round] All defenders eliminated! Attackers win.');
+      this.endRound(Side.ATTACKER);
     }
   }
 
@@ -643,6 +1280,19 @@ export class Game {
     const lossReward = lossRewards[Math.min(loserEcon.lossStreak - 1, 3)];
     loserEcon.money = Math.min(16000, loserEcon.money + lossReward);
 
+    /* Save the round result to history */
+    this.state.roundHistory.push({
+      roundNumber: this.state.roundNumber,
+      winningSide: winner,
+      bombPlanted: this.state.bombPlanted,
+      bombDefused: false,  /* TODO: Track this properly */
+      bombDetonated: this.state.phase === GamePhase.POST_PLANT,
+      kills: [...this.state.currentRoundKills],
+    });
+
+    /* Clear current round kills */
+    this.state.currentRoundKills = [];
+
     /* Transition to round end phase */
     this.state.phase = GamePhase.ROUND_END;
     this.state.timeRemaining = PHASE_DURATIONS[GamePhase.ROUND_END];
@@ -684,10 +1334,10 @@ export class Game {
     this.state.bombPosition = null;
     this.state.bombSite = null;
     this.state.bombTimer = 0;
+    this.state.currentRoundKills = [];
     this.commandSystem.clearAll();
 
-    /* Reset soldiers to spawn positions */
-    /* TODO: Proper spawn position calculation from map data */
+    /* Reset soldiers to alive with full health (keep stats and equipment) */
     for (const soldier of [...this.state.player1Soldiers, ...this.state.player2Soldiers]) {
       soldier.health = 100;
       soldier.alive = true;
@@ -698,6 +1348,8 @@ export class Game {
       soldier.isPlanting = false;
       soldier.isDefusing = false;
       soldier.actionProgress = 0;
+      soldier.detectedEnemies = [];
+      soldier.shotsFired = 0;
     }
 
     /* Start buy phase */
