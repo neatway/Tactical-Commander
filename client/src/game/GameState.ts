@@ -1,53 +1,19 @@
 /**
  * GameState.ts - Core game state definitions and factory functions
  *
- * This file defines the runtime game state that drives the entire match.
- * The state is updated every tick during the live phase and between phases.
- * It's the single source of truth for what's happening in the game.
+ * Re-exports shared enums (GamePhase, Side) from the shared types module
+ * and defines client-specific runtime state interfaces. The state is updated
+ * every tick during the live phase and between phases.
  */
 
-// ============================================================
-// Enums - Game phases and sides
-// ============================================================
-
-/** The current phase of a round */
-export enum GamePhase {
-  /** Players buying weapons/armor/utility for their soldiers */
-  BUY_PHASE = 'BUY_PHASE',
-  /** Players setting waypoints, stances, and tactics before the round starts */
-  STRATEGY_PHASE = 'STRATEGY_PHASE',
-  /** Round is actively playing - soldiers move, fight, and execute commands */
-  LIVE_PHASE = 'LIVE_PHASE',
-  /** Bomb has been planted - defenders must retake and defuse */
-  POST_PLANT = 'POST_PLANT',
-  /** Round just ended - showing summary before next buy phase */
-  ROUND_END = 'ROUND_END',
-  /** Match is over - showing final results */
-  MATCH_END = 'MATCH_END',
-  /** Waiting in lobby / main menu */
-  LOBBY = 'LOBBY',
-}
-
-/** Which side a team is playing this half */
-export enum Side {
-  /** Attacking team - must plant the bomb at a bomb site */
-  ATTACKER = 'ATTACKER',
-  /** Defending team - must prevent the bomb plant or defuse it */
-  DEFENDER = 'DEFENDER',
-}
-
-/** Soldier engagement stance - affects how they behave in combat */
-export enum Stance {
-  /** Pushes fights, peeks corners, prioritizes kills */
-  AGGRESSIVE = 'AGGRESSIVE',
-  /** Holds position, shoots if engaged but doesn't push */
-  DEFENSIVE = 'DEFENSIVE',
-  /** Avoids engagements, retreats if possible */
-  PASSIVE = 'PASSIVE',
-}
+// Re-export shared enums so other client files can import from one place
+import { GamePhase, Side } from '@shared/types/GameTypes';
+import type { Stance } from '@shared/types/SoldierTypes';
+export { GamePhase, Side };
+export type { Stance };
 
 // ============================================================
-// Interfaces - State structures
+// Interfaces - Client-specific state structures
 // ============================================================
 
 /** Position in the game world (top-down, y is up in Three.js so we use x,z) */
@@ -193,7 +159,6 @@ export interface GameState {
 /**
  * Creates the initial game state for a new match.
  * Both players start with $800, score 0-0, round 1.
- *
  * @param matchSeed - Seed for the deterministic RNG
  * @returns Fresh GameState ready for the first buy phase
  */
@@ -202,9 +167,9 @@ export function createInitialGameState(matchSeed: number): GameState {
     phase: GamePhase.BUY_PHASE,
     roundNumber: 1,
     score: { player1: 0, player2: 0 },
-    timeRemaining: 20, // Buy phase duration
-    player1Side: Side.ATTACKER, // Player 1 attacks first half
-    player1Soldiers: [],  // Populated when soldiers are selected
+    timeRemaining: 20,
+    player1Side: Side.ATTACKER,
+    player1Soldiers: [],
     player2Soldiers: [],
     player1Economy: createInitialEconomy(),
     player2Economy: createInitialEconomy(),
@@ -233,7 +198,6 @@ export function createInitialEconomy(): TeamEconomy {
 /**
  * Creates the initial runtime state for a soldier at the start of a round.
  * Soldiers spawn with full health, default pistol, no waypoints.
- *
  * @param index - Soldier's index in the team (0-4)
  * @param soldierId - Reference to persistent soldier data
  * @param spawnPosition - Where to place the soldier in the spawn zone
@@ -250,12 +214,12 @@ export function createSoldierRuntimeState(
     rotation: 0,
     health: 100,
     alive: true,
-    primaryWeapon: null,      // Only default pistol until they buy
+    primaryWeapon: null,
     armor: null,
     helmet: false,
     utility: [],
     defuseKit: false,
-    stance: Stance.DEFENSIVE, // Default to defensive
+    stance: 'DEFENSIVE',
     isMoving: false,
     isInCombat: false,
     currentTarget: null,

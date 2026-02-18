@@ -15,18 +15,16 @@ import type {
   Soldier,
   SoldierState,
   SoldierStats,
-  Vec2,
   Stance,
-  UtilityItem,
-  Weapon,
-} from "../../../../shared/types/SoldierTypes";
+} from "@shared/types/SoldierTypes";
+import type { Vec2 } from "@shared/util/MathUtils";
 
 import {
   calculateMovementSpeed,
   calculateDetectionRadius,
   calculateStealthModifier,
   calculateBaseHitChance,
-} from "../../../../shared/formulas/StatFormulas";
+} from "@shared/constants/StatFormulas";
 
 // ============================================================================
 // --- ClientSoldier Class ---

@@ -171,7 +171,6 @@ export class HUD {
       [GamePhase.POST_PLANT]: 'BOMB PLANTED',
       [GamePhase.ROUND_END]: 'ROUND OVER',
       [GamePhase.MATCH_END]: 'MATCH OVER',
-      [GamePhase.LOBBY]: 'LOBBY',
     };
     return labels[phase] ?? phase;
   }

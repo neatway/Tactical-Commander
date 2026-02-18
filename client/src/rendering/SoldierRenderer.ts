@@ -204,9 +204,9 @@ export class SoldierRenderer {
     alive: boolean
   ): void {
     const group = this.soldierMeshes.get(soldierId);
-    if (\!group) return;
+    if (!group) return;
 
-    if (\!alive) {
+    if (!alive) {
       /**
        * Dead soldiers are either hidden or shown as grey laying flat.
        * We change the body material to dark grey and rotate the group
@@ -310,10 +310,10 @@ export class SoldierRenderer {
       this.visionCones.delete(soldierId);
     }
 
-    if (\!visible) return;
+    if (!visible) return;
 
     const group = this.soldierMeshes.get(soldierId);
-    if (\!group) return;
+    if (!group) return;
 
     /**
      * Create a pie-slice shape using CircleGeometry.
@@ -381,7 +381,7 @@ export class SoldierRenderer {
     this.clearWaypoints(soldierId);
 
     const group = this.soldierMeshes.get(soldierId);
-    if (\!group || waypoints.length === 0) return;
+    if (!group || waypoints.length === 0) return;
 
     /** Create a group to hold all waypoint visual elements */
     const wpGroup = new THREE.Group();
@@ -460,7 +460,7 @@ export class SoldierRenderer {
    */
   public clearWaypoints(soldierId: string): void {
     const wpGroup = this.waypointGroups.get(soldierId);
-    if (\!wpGroup) return;
+    if (!wpGroup) return;
 
     /** Traverse all children and dispose their geometry/materials */
     wpGroup.traverse((child) => {

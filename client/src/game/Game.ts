@@ -176,7 +176,7 @@ export class Game {
    * Spawn soldiers at their team's spawn zone.
    * Distributes 5 soldiers evenly within the spawn area.
    */
-  private spawnSoldiers(mapData: any): void {
+  private spawnSoldiers(mapData: { spawnZones: { attacker: { x: number; z: number; width: number; height: number }; defender: { x: number; z: number; width: number; height: number } } }): void {
     const attackerSpawn = mapData.spawnZones.attacker;
     const defenderSpawn = mapData.spawnZones.defender;
 
@@ -538,7 +538,7 @@ export class Game {
    */
   private updatePhaseTimer(deltaTime: number): void {
     /* Don't tick timer during match end or lobby */
-    if (this.state.phase === GamePhase.MATCH_END || this.state.phase === GamePhase.LOBBY) {
+    if (this.state.phase === GamePhase.MATCH_END) {
       return;
     }
 
@@ -700,7 +700,7 @@ export class Game {
           `${prefix}_${soldier.index}`,
           soldier.position,
           soldier.rotation,
-          soldier.health,
+          soldier.health / 100,  /* Normalize 0-100 to 0.0-1.0 for renderer */
           soldier.alive
         );
       }

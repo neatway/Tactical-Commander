@@ -16,21 +16,33 @@
  * All random values come from SeededRandom for deterministic simulation.
  */
 
-import type { Vec2 } from "../../../../shared/types/SoldierTypes";
-import type { MapData, Wall } from "../../../../shared/types/MapTypes";
+import type { Vec2 } from "@shared/util/MathUtils";
+import type { MapData, Wall } from "@shared/types/MapTypes";
 import {
   distance,
   angleBetween,
-  angleDifference,
   degreesToRadians,
   lineIntersectsRect,
-} from "../../../../shared/util/MathUtils";
+} from "@shared/util/MathUtils";
 import {
   calculateDetectionRadius,
   calculateStealthModifier,
-} from "../../../../shared/formulas/StatFormulas";
-import { SeededRandom } from "../../../../shared/util/SeededRandom";
-import { SIMULATION } from "../../../../shared/constants/GameConstants";
+} from "@shared/constants/StatFormulas";
+import { SeededRandom } from "@shared/util/RandomUtils";
+import { SIMULATION } from "@shared/constants/GameConstants";
+
+/**
+ * Calculate the smallest signed angle difference between two angles.
+ * Returns a value in [-PI, PI].
+ * @param a - First angle in radians
+ * @param b - Second angle in radians
+ */
+function angleDifference(a: number, b: number): number {
+  let diff = a - b;
+  while (diff > Math.PI) diff -= 2 * Math.PI;
+  while (diff < -Math.PI) diff += 2 * Math.PI;
+  return diff;
+}
 import type { ClientSoldier } from "./Soldier";
 
 // ============================================================================

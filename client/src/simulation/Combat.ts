@@ -17,7 +17,7 @@
  * All formulas reference the shared StatFormulas module.
  */
 
-import type { Vec2 } from "../../../../shared/types/SoldierTypes";
+import type { Vec2 } from "@shared/util/MathUtils";
 import {
   calculateReactionTime,
   calculateBaseHitChance,
@@ -28,10 +28,10 @@ import {
   calculateComposureModifier,
   calculateClutchModifier,
   calculateTeamworkModifier,
-} from "../../../../shared/formulas/StatFormulas";
-import { distance } from "../../../../shared/util/MathUtils";
-import { SeededRandom } from "../../../../shared/util/SeededRandom";
-import { SIMULATION } from "../../../../shared/constants/GameConstants";
+} from "@shared/constants/StatFormulas";
+import { distance } from "@shared/util/MathUtils";
+import { SeededRandom } from "@shared/util/RandomUtils";
+import { SIMULATION } from "@shared/constants/GameConstants";
 import type { ClientSoldier } from "./Soldier";
 
 // ============================================================================

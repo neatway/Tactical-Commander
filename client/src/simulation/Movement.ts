@@ -13,10 +13,10 @@
  * between non-adjacent waypoints and skipping intermediate ones.
  */
 
-import type { Vec2 } from "../../../../shared/types/SoldierTypes";
-import type { MapData, Wall } from "../../../../shared/types/MapTypes";
-import { distance, angleBetween, lineIntersectsRect } from "../../../../shared/util/MathUtils";
-import { MAP } from "../../../../shared/constants/GameConstants";
+import type { Vec2 } from "@shared/util/MathUtils";
+import type { MapData, Wall } from "@shared/types/MapTypes";
+import { distance, angleBetween, lineIntersectsRect } from "@shared/util/MathUtils";
+import { MAP } from "@shared/constants/GameConstants";
 import type { ClientSoldier } from "./Soldier";
 
 // ============================================================================
