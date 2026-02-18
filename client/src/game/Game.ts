@@ -34,6 +34,7 @@ import type { EconomyUpdate } from '../simulation/EconomyManager';
 import { HUD } from '../ui/HUD';
 import { BuyMenu } from '../ui/BuyMenu';
 import { RoundSummary } from '../ui/RoundSummary';
+import { StrategyEditor } from '../ui/StrategyEditor';
 import { BotAI } from './BotAI';
 import {
   GamePhase,
@@ -137,6 +138,8 @@ export class Game {
   private buyMenu: BuyMenu;
   /** Round summary screen shown during ROUND_END phase */
   private roundSummary: RoundSummary;
+  /** Strategy phase editor for waypoints and stances */
+  private strategyEditor: StrategyEditor;
   /** Utility system managing active smokes, flashes, frags, molotovs, decoys */
   private utilitySystem: UtilitySystem;
   /** Economy manager — calculates kill rewards, round rewards, bomb bonuses */
@@ -231,6 +234,42 @@ export class Game {
 
     /* Initialize the round summary screen (hidden by default, shown during ROUND_END) */
     this.roundSummary = new RoundSummary('round-summary');
+
+    /* Initialize the strategy phase editor (hidden by default, shown during STRATEGY_PHASE) */
+    this.strategyEditor = new StrategyEditor();
+
+    /**
+     * Wire up strategy editor callbacks:
+     *   - Soldier selection syncs with the game's selectedSoldier
+     *   - Stance changes are applied to the soldier's runtime state
+     *   - Waypoint clearing empties the soldier's waypoint array
+     */
+    this.strategyEditor.onSoldierSelect = (index: number) => {
+      this.selectedSoldier = index;
+      const prefix = this.localPlayer === 1 ? 'p1' : 'p2';
+      this.soldierRenderer.setSelected(`${prefix}_${index}`);
+    };
+
+    this.strategyEditor.onStanceChange = (index: number, stance) => {
+      const mySoldiers = this.localPlayer === 1
+        ? this.state.player1Soldiers
+        : this.state.player2Soldiers;
+      if (mySoldiers[index]) {
+        mySoldiers[index].stance = stance;
+      }
+    };
+
+    this.strategyEditor.onClearWaypoints = (index: number) => {
+      const mySoldiers = this.localPlayer === 1
+        ? this.state.player1Soldiers
+        : this.state.player2Soldiers;
+      if (mySoldiers[index]) {
+        mySoldiers[index].waypoints = [];
+        /* Also clear the visual waypoint lines */
+        const prefix = this.localPlayer === 1 ? 'p1' : 'p2';
+        this.soldierRenderer.showWaypoints(`${prefix}_${index}`, [], '#ff6666');
+      }
+    };
 
     /* Initialize the utility system (manages active smokes, flashes, etc.) */
     this.utilitySystem = new UtilitySystem();
@@ -1845,12 +1884,23 @@ export class Game {
    */
   private advancePhase(): void {
     switch (this.state.phase) {
-      case GamePhase.BUY_PHASE:
+      case GamePhase.BUY_PHASE: {
         /* Buy phase -> Strategy phase */
         this.state.phase = GamePhase.STRATEGY_PHASE;
         this.state.timeRemaining = PHASE_DURATIONS[GamePhase.STRATEGY_PHASE];
+
+        /* Show the strategy editor with the local player's soldiers */
+        const mySoldiers = this.localPlayer === 1
+          ? this.state.player1Soldiers
+          : this.state.player2Soldiers;
+        this.strategyEditor.show(
+          mySoldiers,
+          this.selectedSoldier ?? 0
+        );
+
         console.log(`[Phase] Strategy Phase - Plan your tactics (${this.state.timeRemaining}s)`);
         break;
+      }
 
       case GamePhase.STRATEGY_PHASE:
         /* Strategy phase -> Live phase (round begins!) */
@@ -1858,6 +1908,10 @@ export class Game {
         this.state.timeRemaining = PHASE_DURATIONS[GamePhase.LIVE_PHASE];
         this.state.tick = 0;
         this.gameTime = 0;
+
+        /* Hide the strategy editor when going live */
+        this.strategyEditor.hide();
+
         console.log(`[Phase] LIVE - Round ${this.state.roundNumber} started!`);
         break;
 
@@ -2185,6 +2239,22 @@ export class Game {
       /* Auto-close the buy menu when leaving the buy phase */
       if (this.state.phase !== GamePhase.BUY_PHASE) {
         this.buyMenu.hide();
+      }
+    }
+
+    /* Update the strategy editor during strategy phase */
+    if (this.strategyEditor.isVisible()) {
+      if (this.state.phase === GamePhase.STRATEGY_PHASE) {
+        const stratSoldiers = this.localPlayer === 1
+          ? this.state.player1Soldiers
+          : this.state.player2Soldiers;
+        this.strategyEditor.update(
+          stratSoldiers,
+          this.selectedSoldier ?? 0
+        );
+      } else {
+        /* Auto-close if we've left the strategy phase */
+        this.strategyEditor.hide();
       }
     }
   }
