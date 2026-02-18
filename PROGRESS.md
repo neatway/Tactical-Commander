@@ -8,8 +8,8 @@
 
 | Milestone | Description | Progress |
 |-----------|-------------|----------|
-| **M1** | Core Prototype (playable in browser) | ~70% |
-| **M2** | Full Round Loop + Economy | ~10% |
+| **M1** | Core Prototype (playable in browser) | ~80% |
+| **M2** | Full Round Loop + Economy | ~20% |
 | **M3** | Online Multiplayer | ~5% |
 | **M4** | Meta-Game (crates, inventory, progression) | ~3% |
 | **M5** | Polish & Balance (ranks, maps, audio, replays) | 0% |
@@ -54,7 +54,7 @@ The goal is to open the browser, see a top-down map, select soldiers, move them,
 - [x] **Integration pass** — Fixed imports, reconciled types, core rendering compiles and runs
 - [ ] **Fog of war** — Texture-based visibility masking
 - [x] **Basic AI opponent** — BotAI class with per-soldier state machine, preset strategies, engagement/rotation logic
-- [ ] **Utility system** — Smoke (blocks vision), flash (blinds), frag (area damage), molotov (area denial), decoy (fake sounds)
+- [x] **Utility system** — Smoke (blocks vision), flash (blinds), frag (area damage), molotov (area denial), decoy (fake sounds)
 - [ ] **Bomb plant/defuse** — Progress bars, zone checks, timer transitions
 
 ### Known Issues To Fix
@@ -81,7 +81,7 @@ The goal is a complete round-to-round experience with buying, strategy planning,
 
 ### Not Started
 
-- [ ] **Buy menu UI** — HTML overlay, per-soldier weapon/armor/utility purchases, cost display
+- [x] **Buy menu UI** — HTML overlay, per-soldier weapon/armor/utility purchases, cost display
 - [ ] **Strategy phase UI** — Waypoint editor, stance selection, timing links between soldiers
 - [ ] **Economy manager** — Kill rewards by weapon, bomb plant/defuse bonus ($300), proper round rewards
 - [ ] **Round summary screen** — Kill feed, MVP, economy changes, round winner display

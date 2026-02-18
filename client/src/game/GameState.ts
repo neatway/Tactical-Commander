@@ -188,6 +188,8 @@ export interface GameState {
   bombSite: string | null;
   /** Seconds remaining on bomb timer (only when planted) */
   bombTimer: number;
+  /** Whether the bomb was defused this round */
+  bombDefused: boolean;
   /** Current simulation tick number within this round */
   tick: number;
   /** History of completed rounds */
@@ -279,6 +281,7 @@ export function createInitialGameState(matchSeed: number): GameState {
     bombPosition: null,
     bombSite: null,
     bombTimer: 0,
+    bombDefused: false,
     tick: 0,
     roundHistory: [],
     matchSeed,

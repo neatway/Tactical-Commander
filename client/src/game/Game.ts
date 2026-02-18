@@ -27,6 +27,7 @@ import { CommandSystem, CommandType } from './CommandSystem';
 import { MovementSystem } from '../simulation/Movement';
 import { DetectionSystem } from '../simulation/Detection';
 import { UtilitySystem } from '../simulation/Utility';
+import { BombLogic } from '../simulation/BombLogic';
 import { HUD } from '../ui/HUD';
 import { BuyMenu } from '../ui/BuyMenu';
 import { BotAI } from './BotAI';
@@ -132,6 +133,8 @@ export class Game {
   private buyMenu: BuyMenu;
   /** Utility system managing active smokes, flashes, frags, molotovs, decoys */
   private utilitySystem: UtilitySystem;
+  /** Bomb plant/defuse logic — zone checks, progress tracking */
+  private bombLogic: BombLogic | null = null;
   /** AI opponent controlling player 2's soldiers */
   private botAI: BotAI | null = null;
 
@@ -164,6 +167,16 @@ export class Game {
    * map will throw this utility at that position, then clear the slot.
    */
   private pendingUtilityType: UtilityType | null = null;
+  /**
+   * Whether the player is currently holding the plant key (P).
+   * Tracked each frame; the simulation tick reads this to progress planting.
+   */
+  private isRequestingPlant: boolean = false;
+  /**
+   * Whether the player is currently holding the defuse key (E).
+   * Tracked each frame; the simulation tick reads this to progress defusing.
+   */
+  private isRequestingDefuse: boolean = false;
 
   /**
    * Initialize all game systems.
@@ -236,6 +249,10 @@ export class Game {
     /* Initialize the detection system with the map walls */
     this.detectionSystem = new DetectionSystem(BAZAAR_MAP.walls);
     console.log('[Game] Detection system initialized');
+
+    /* Initialize bomb plant/defuse logic with the map's bomb sites */
+    this.bombLogic = new BombLogic(BAZAAR_MAP.bombSites);
+    console.log('[Game] Bomb logic initialized with', BAZAAR_MAP.bombSites.length, 'bomb sites');
 
     /* Update camera bounds to match loaded map */
     this.cameraController = new CameraController(
@@ -412,6 +429,16 @@ export class Game {
       /* Retreat command */
       this.issueCommand(CommandType.RETREAT, this.selectedSoldier);
     }
+
+    /* --- Bomb plant/defuse (hold keys P and E) --- */
+    /**
+     * Track whether the plant and defuse keys are being held this frame.
+     * The simulation tick will read these flags and accumulate progress.
+     * Releasing the key resets progress (must hold continuously).
+     */
+    this.isRequestingPlant = this.input.isKeyDown('KeyP');
+    this.isRequestingDefuse = this.input.isKeyDown('KeyE');
+
     if (this.input.wasKeyPressed('KeyB')) {
       /* Toggle buy menu — only during buy phase */
       if (this.state.phase === GamePhase.BUY_PHASE) {
@@ -689,7 +716,10 @@ export class Game {
     /* Step 6: Tick utility effects (smoke, molotov DPS, flash timers) */
     this.updateUtility();
 
-    /* Step 7: Check round end conditions */
+    /* Step 7: Update bomb plant/defuse progress */
+    this.updateBombActions();
+
+    /* Step 8: Check round end conditions */
     this.checkRoundEndConditions();
   }
 
@@ -1322,6 +1352,17 @@ export class Game {
     /* --- Apply damage to target --- */
     target.health -= damage;
 
+    /**
+     * Interrupt plant/defuse action if the target takes damage.
+     * Taking a bullet breaks concentration and resets action progress.
+     */
+    if (target.isPlanting || target.isDefusing) {
+      console.log(`[Bomb] ${target.soldierId} interrupted while ${target.isPlanting ? 'planting' : 'defusing'} (took damage)`);
+      target.isPlanting = false;
+      target.isDefusing = false;
+      target.actionProgress = 0;
+    }
+
     /* Check if target was killed */
     if (target.health <= 0) {
       target.health = 0;
@@ -1379,7 +1420,249 @@ export class Game {
   }
 
   // ============================================================
-  // Round End Conditions (Sim Step 7)
+  // Bomb Plant/Defuse (Sim Step 7)
+  // ============================================================
+
+  /**
+   * Update bomb plant and defuse actions each simulation tick.
+   *
+   * Plant logic:
+   *   - The selected attacker soldier must be alive and inside a plant zone
+   *   - The player must be holding the P key
+   *   - Progress accumulates by dt each tick (3 seconds to plant)
+   *   - The soldier cannot move while planting (waypoints are cleared)
+   *   - If the player releases P or the soldier leaves the zone, progress resets
+   *   - When plant completes: bomb is placed, phase transitions to POST_PLANT
+   *
+   * Defuse logic:
+   *   - A defender soldier must be alive and near the planted bomb
+   *   - The player must be holding the E key
+   *   - Progress accumulates by dt each tick (5s without kit, 3s with kit)
+   *   - The soldier cannot move while defusing
+   *   - If interrupted, progress resets
+   *   - When defuse completes: defenders win the round
+   */
+  private updateBombActions(): void {
+    if (!this.bombLogic) return;
+
+    const dt = TICK_RATE_MS / 1000;
+
+    /**
+     * Determine which soldiers are attackers and which are defenders.
+     * Player 1's side determines this; player 2 is the opposite.
+     */
+    const p1IsAttacker = this.state.player1Side === Side.ATTACKER;
+    const attackerSoldiers = p1IsAttacker
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+    const defenderSoldiers = p1IsAttacker
+      ? this.state.player2Soldiers
+      : this.state.player1Soldiers;
+
+    /* Which player controls the attackers? */
+    const attackerPlayer: 1 | 2 = p1IsAttacker ? 1 : 2;
+    const defenderPlayer: 1 | 2 = p1IsAttacker ? 2 : 1;
+
+    // --- PLANT LOGIC ---
+    if (!this.state.bombPlanted && this.state.phase === GamePhase.LIVE_PHASE) {
+      this.updatePlantAction(attackerSoldiers, attackerPlayer, dt);
+    }
+
+    // --- DEFUSE LOGIC ---
+    if (this.state.bombPlanted && this.state.phase === GamePhase.POST_PLANT) {
+      this.updateDefuseAction(defenderSoldiers, defenderPlayer, dt);
+    }
+  }
+
+  /**
+   * Handle bomb plant progress for the attacking team.
+   *
+   * Only the local player's selected soldier can plant (if they're an attacker).
+   * The bot AI handles plant logic independently in BotAI.ts.
+   *
+   * @param attackerSoldiers - The attacking team's soldiers
+   * @param attackerPlayer - Which player (1 or 2) controls the attackers
+   * @param dt - Time delta for this tick (seconds)
+   */
+  private updatePlantAction(
+    attackerSoldiers: SoldierRuntimeState[],
+    attackerPlayer: 1 | 2,
+    dt: number
+  ): void {
+    if (!this.bombLogic) return;
+
+    /**
+     * Check if the local player is the attacker and is requesting a plant.
+     * The bot AI handles its own plant logic separately.
+     */
+    const localIsAttacker = this.localPlayer === attackerPlayer;
+
+    for (const soldier of attackerSoldiers) {
+      if (!soldier.alive || !soldier.hasBomb) continue;
+
+      /**
+       * Determine if this soldier should be planting:
+       * - Local player: must be holding P key and have this soldier selected
+       * - Bot AI: BotAI sets isPlanting directly
+       */
+      const shouldPlant = localIsAttacker
+        ? (this.isRequestingPlant &&
+           this.selectedSoldier === soldier.index)
+        : soldier.isPlanting; /* Bot AI sets this directly */
+
+      if (shouldPlant) {
+        /* Check if the soldier is inside a plant zone */
+        const siteId = this.bombLogic.isInPlantZone(soldier.position);
+
+        if (siteId) {
+          /* Start or continue planting */
+          soldier.isPlanting = true;
+          soldier.isMoving = false;
+          soldier.waypoints = [];
+          soldier.actionProgress += dt;
+
+          /* Check if plant is complete */
+          if (this.bombLogic.isPlantComplete(soldier.actionProgress)) {
+            this.completeBombPlant(soldier, siteId);
+          }
+        } else {
+          /* Not in a plant zone — reset plant progress */
+          if (soldier.isPlanting) {
+            console.log(`[Bomb] ${soldier.soldierId} left the plant zone — plant cancelled`);
+          }
+          soldier.isPlanting = false;
+          soldier.actionProgress = 0;
+        }
+      } else {
+        /* Not holding plant key — reset progress */
+        if (soldier.isPlanting) {
+          soldier.isPlanting = false;
+          soldier.actionProgress = 0;
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle bomb defuse progress for the defending team.
+   *
+   * @param defenderSoldiers - The defending team's soldiers
+   * @param defenderPlayer - Which player (1 or 2) controls the defenders
+   * @param dt - Time delta for this tick (seconds)
+   */
+  private updateDefuseAction(
+    defenderSoldiers: SoldierRuntimeState[],
+    defenderPlayer: 1 | 2,
+    dt: number
+  ): void {
+    if (!this.bombLogic || !this.state.bombPosition) return;
+
+    const localIsDefender = this.localPlayer === defenderPlayer;
+
+    for (const soldier of defenderSoldiers) {
+      if (!soldier.alive) continue;
+
+      /**
+       * Determine if this soldier should be defusing:
+       * - Local player: must be holding E key and have this soldier selected
+       * - Bot AI: BotAI sets isDefusing directly
+       */
+      const shouldDefuse = localIsDefender
+        ? (this.isRequestingDefuse &&
+           this.selectedSoldier === soldier.index)
+        : soldier.isDefusing; /* Bot AI sets this directly */
+
+      if (shouldDefuse) {
+        /* Check if the soldier is within defuse range of the bomb */
+        const inRange = this.bombLogic.isInDefuseRange(
+          soldier.position,
+          this.state.bombPosition
+        );
+
+        if (inRange) {
+          /* Start or continue defusing */
+          soldier.isDefusing = true;
+          soldier.isMoving = false;
+          soldier.waypoints = [];
+          soldier.actionProgress += dt;
+
+          /* Check if defuse is complete */
+          if (this.bombLogic.isDefuseComplete(soldier.actionProgress, soldier.defuseKit)) {
+            this.completeBombDefuse(soldier);
+          }
+        } else {
+          /* Out of range — reset defuse progress */
+          if (soldier.isDefusing) {
+            console.log(`[Bomb] ${soldier.soldierId} moved out of defuse range — defuse cancelled`);
+          }
+          soldier.isDefusing = false;
+          soldier.actionProgress = 0;
+        }
+      } else {
+        /* Not holding defuse key — reset progress */
+        if (soldier.isDefusing) {
+          soldier.isDefusing = false;
+          soldier.actionProgress = 0;
+        }
+      }
+    }
+  }
+
+  /**
+   * Complete the bomb plant action.
+   * Places the bomb at the soldier's position, transitions to POST_PLANT phase.
+   *
+   * @param planter - The soldier who planted the bomb
+   * @param siteId - Which bomb site the bomb was planted at ('A' or 'B')
+   */
+  private completeBombPlant(planter: SoldierRuntimeState, siteId: string): void {
+    /* Update game state */
+    this.state.bombPlanted = true;
+    this.state.bombPosition = { ...planter.position };
+    this.state.bombSite = siteId;
+    this.state.bombTimer = PHASE_DURATIONS[GamePhase.POST_PLANT];
+
+    /* Reset the planter's action state */
+    planter.isPlanting = false;
+    planter.actionProgress = 0;
+    planter.hasBomb = false;
+
+    /* Transition to POST_PLANT phase */
+    this.state.phase = GamePhase.POST_PLANT;
+    this.state.timeRemaining = PHASE_DURATIONS[GamePhase.POST_PLANT];
+
+    console.log(
+      `[Bomb] ${planter.soldierId} planted the bomb at site ${siteId}` +
+      ` (${Math.round(planter.position.x)}, ${Math.round(planter.position.z)})` +
+      ` — ${PHASE_DURATIONS[GamePhase.POST_PLANT]}s until detonation`
+    );
+  }
+
+  /**
+   * Complete the bomb defuse action.
+   * Defenders win the round. Transitions to ROUND_END.
+   *
+   * @param defuser - The soldier who defused the bomb
+   */
+  private completeBombDefuse(defuser: SoldierRuntimeState): void {
+    /* Reset the defuser's action state */
+    defuser.isDefusing = false;
+    defuser.actionProgress = 0;
+
+    /* Mark the bomb as defused */
+    this.state.bombDefused = true;
+
+    console.log(
+      `[Bomb] ${defuser.soldierId} DEFUSED the bomb!` +
+      ` (kit: ${defuser.defuseKit ? 'yes' : 'no'})`
+    );
+
+    /* Defenders win the round */
+    this.endRound(Side.DEFENDER);
+  }
+
+  // ============================================================
+  // Round End Conditions (Sim Step 8)
   // ============================================================
 
   /**
@@ -1526,7 +1809,7 @@ export class Game {
       roundNumber: this.state.roundNumber,
       winningSide: winner,
       bombPlanted: this.state.bombPlanted,
-      bombDefused: false,  /* TODO: Track this properly */
+      bombDefused: this.state.bombDefused,
       bombDetonated: this.state.phase === GamePhase.POST_PLANT,
       kills: [...this.state.currentRoundKills],
     });
@@ -1572,6 +1855,7 @@ export class Game {
 
     /* Reset round state */
     this.state.bombPlanted = false;
+    this.state.bombDefused = false;
     this.state.bombPosition = null;
     this.state.bombSite = null;
     this.state.bombTimer = 0;

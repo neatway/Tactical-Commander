@@ -301,6 +301,7 @@ export class InputManager {
       'KeyW', 'KeyA', 'KeyS', 'KeyD',     // Camera pan
       'Space',                               // Could be used for actions
       'KeyH', 'KeyR', 'KeyG', 'KeyP',       // Hold, Retreat, Regroup, Plant
+      'KeyE',                                // Defuse bomb
       'KeyB',                                // Buy menu toggle
       'Digit1', 'Digit2', 'Digit3', 'Digit4', // Utility selection
       'Tab',                                 // Scoreboard
