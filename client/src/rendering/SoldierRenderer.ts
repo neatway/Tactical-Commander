@@ -51,6 +51,9 @@ export class SoldierRenderer {
   /** The ID of the currently selected soldier, or null if none selected. */
   private selectedSoldierId: string | null = null;
 
+  /** Additional soldier IDs that are part of a multi-selection (drag-select). */
+  private multiSelectedIds: Set<string> = new Set();
+
   /**
    * Creates a new SoldierRenderer attached to the given scene.
    *
@@ -90,25 +93,26 @@ export class SoldierRenderer {
      * Height=25 is the cylinder portion (total height = 25 + 2*8 = 41).
      */
     const bodyColor = teamColor === 'red' ? 0xcc3333 : 0x3333cc;
-    const bodyGeometry = new THREE.CapsuleGeometry(8, 25, 8, 16);
+    const bodyGeometry = new THREE.CapsuleGeometry(16, 50, 8, 16);
     const bodyMaterial = new THREE.MeshStandardMaterial({
       color: bodyColor,
       roughness: 0.6,
     });
     const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
     body.name = 'body';
+    /* Store original team color for respawn color reset */
+    body.userData.teamColor = bodyColor;
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
 
     /* ----- Direction Indicator ----- */
     /**
-     * Small cone at the front of the soldier showing which direction
-     * they are facing. Uses a slightly lighter version of the team color.
-     * ConeGeometry(radius=3, height=8, segments=8) for a small arrow.
+     * Cone at the front of the soldier showing which direction they face.
+     * Uses a slightly lighter version of the team color.
      */
     const dirColor = teamColor === 'red' ? 0xee5555 : 0x5555ee;
-    const dirGeometry = new THREE.ConeGeometry(3, 8, 8);
+    const dirGeometry = new THREE.ConeGeometry(6, 16, 8);
     const dirMaterial = new THREE.MeshStandardMaterial({
       color: dirColor,
       roughness: 0.5,
@@ -122,27 +126,25 @@ export class SoldierRenderer {
      * Position it at the front of the capsule.
      */
     dirIndicator.rotation.x = -Math.PI / 2;
-    dirIndicator.position.set(0, 0, 12); /* 12 units in front of center */
+    dirIndicator.position.set(0, 0, 24); /* In front of the bigger capsule */
     group.add(dirIndicator);
 
     /* ----- Health Bar ----- */
     /**
-     * Health bar is composed of two thin boxes:
+     * Health bar composed of two thin boxes above soldier's head.
      * 1. Background bar (dark gray) - always full width
      * 2. Foreground bar (green) - scales with health percentage
-     *
-     * Both are positioned above the soldier's head.
      */
-    const healthBarWidth = 20;
-    const healthBarHeight = 2;
-    const healthBarDepth = 1;
+    const healthBarWidth = 40;
+    const healthBarHeight = 4;
+    const healthBarDepth = 2;
 
     /** Dark background bar (always visible, full width) */
     const bgGeometry = new THREE.BoxGeometry(healthBarWidth, healthBarHeight, healthBarDepth);
     const bgMaterial = new THREE.MeshBasicMaterial({ color: 0x333333 });
     const healthBg = new THREE.Mesh(bgGeometry, bgMaterial);
     healthBg.name = 'healthBg';
-    healthBg.position.set(0, 25, 0); /* Above the capsule head */
+    healthBg.position.set(0, 50, 0); /* Above the bigger capsule head */
     group.add(healthBg);
 
     /** Green foreground bar (scales with remaining health) */
@@ -150,16 +152,15 @@ export class SoldierRenderer {
     const fgMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
     const healthFg = new THREE.Mesh(fgGeometry, fgMaterial);
     healthFg.name = 'healthFg';
-    healthFg.position.set(0, 25, 0); /* Same position as background */
+    healthFg.position.set(0, 50, 0); /* Same position as background */
     group.add(healthFg);
 
     /* ----- Selection Ring ----- */
     /**
      * A yellow torus around the soldier's base to indicate selection.
-     * TorusGeometry(outerRadius=12, tubeRadius=1.5) creates a ring.
      * Hidden by default; shown via setSelected().
      */
-    const ringGeometry = new THREE.TorusGeometry(12, 1.5, 8, 32);
+    const ringGeometry = new THREE.TorusGeometry(24, 3, 8, 32);
     const ringMaterial = new THREE.MeshBasicMaterial({
       color: 0xffff00,      /* bright yellow */
       transparent: true,
@@ -174,10 +175,10 @@ export class SoldierRenderer {
 
     /* ----- Position the Group ----- */
     /**
-     * Place the entire group at the specified world position.
-     * Y offset of 25/2 = 12.5 so the capsule base sits on the ground.
+     * Place the group at the specified world position.
+     * Y offset of 50/2 = 25 so the bigger capsule base sits on the ground.
      */
-    group.position.set(position.x, 25 / 2, position.z);
+    group.position.set(position.x, 50 / 2, position.z);
 
     /* Add to scene and store reference */
     this.scene.add(group);
@@ -207,40 +208,38 @@ export class SoldierRenderer {
     if (!group) return;
 
     if (!alive) {
-      /**
-       * Dead soldiers are either hidden or shown as grey laying flat.
-       * We change the body material to dark grey and rotate the group
-       * to lay on its side, giving a "fallen" appearance.
-       */
-      const body = group.getObjectByName('body') as THREE.Mesh | undefined;
-      if (body) {
-        (body.material as THREE.MeshStandardMaterial).color.set(0x444444);
-      }
-      group.rotation.z = Math.PI / 2; /* Lay on side */
-      group.position.y = 5;           /* Lower to near-ground */
+      /* Hide dead soldiers completely — no more confusing black pills */
+      group.visible = false;
       return;
     }
 
-    /* Update world position (maintain Y offset for capsule base) */
-    group.position.set(position.x, 25 / 2, position.z);
+    /* Make sure soldier is visible (in case they were dead last frame) */
+    group.visible = true;
+
+    /* Reset death pose if soldier was previously dead (respawn) */
+    group.rotation.z = 0;
+
+    /* Restore original team color if it was greyed out on death */
+    const body = group.getObjectByName('body') as THREE.Mesh | undefined;
+    if (body) {
+      const originalColor = (body.userData as any).teamColor;
+      if (originalColor !== undefined) {
+        (body.material as THREE.MeshStandardMaterial).color.set(originalColor);
+      }
+    }
+
+    /* Update world position (Y=25 so bigger capsule base sits on ground) */
+    group.position.set(position.x, 50 / 2, position.z);
 
     /* Rotate the entire group to face the specified direction */
     group.rotation.y = rotation;
 
     /* ----- Update Health Bar ----- */
-    /**
-     * Scale the green foreground bar proportionally to remaining health.
-     * Scale on the X axis (width) from 1.0 (full health) to 0.0 (dead).
-     * Offset the position so the bar shrinks from the right side.
-     */
     const healthFg = group.getObjectByName('healthFg') as THREE.Mesh | undefined;
     if (healthFg) {
       healthFg.scale.x = Math.max(0, Math.min(1, health));
-      /**
-       * Shift the bar left as it shrinks so it appears to decrease
-       * from right to left. Offset = (1 - health) * halfWidth * -1.
-       */
-      const halfWidth = 10; /* half of healthBarWidth (20) */
+      /* Shift bar left as it shrinks (decreases from right to left) */
+      const halfWidth = 20; /* half of healthBarWidth (40) */
       healthFg.position.x = -(1 - health) * halfWidth / 2;
 
       /* Change color from green to yellow to red based on health */
@@ -272,6 +271,9 @@ export class SoldierRenderer {
       }
     }
 
+    /* Also clear any multi-selected soldiers when primary selection changes */
+    this.clearMultiSelection();
+
     /* Show the ring on the newly selected soldier */
     this.selectedSoldierId = soldierId;
     if (soldierId) {
@@ -281,6 +283,39 @@ export class SoldierRenderer {
         if (ring) ring.visible = true;
       }
     }
+  }
+
+  /**
+   * Add a soldier to the multi-selection group (e.g., from drag-select).
+   * Shows a selection ring on the soldier without clearing the primary selection.
+   *
+   * @param soldierId - The ID of the soldier to add to selection
+   */
+  public addToSelection(soldierId: string): void {
+    /* Don't re-add the primary selected soldier */
+    if (soldierId === this.selectedSoldierId) return;
+
+    this.multiSelectedIds.add(soldierId);
+    const group = this.soldierMeshes.get(soldierId);
+    if (group) {
+      const ring = group.getObjectByName('selectionRing') as THREE.Mesh | undefined;
+      if (ring) ring.visible = true;
+    }
+  }
+
+  /**
+   * Clear all multi-selected soldiers (hide their selection rings).
+   * Does NOT clear the primary selection.
+   */
+  private clearMultiSelection(): void {
+    for (const id of this.multiSelectedIds) {
+      const group = this.soldierMeshes.get(id);
+      if (group) {
+        const ring = group.getObjectByName('selectionRing') as THREE.Mesh | undefined;
+        if (ring) ring.visible = false;
+      }
+    }
+    this.multiSelectedIds.clear();
   }
 
   /**

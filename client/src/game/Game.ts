@@ -29,7 +29,7 @@ import { MapRenderer } from '../rendering/MapRenderer';
 import { SoldierRenderer } from '../rendering/SoldierRenderer';
 import { CameraController } from '../rendering/Camera';
 import { FogOfWar } from '../rendering/FogOfWar';
-import { InputManager, MouseButton } from './InputManager';
+import { InputManager, MouseButton, type DragRect } from './InputManager';
 import { CommandSystem, CommandType } from './CommandSystem';
 import { MovementSystem } from '../simulation/Movement';
 import { DetectionSystem } from '../simulation/Detection';
@@ -170,8 +170,10 @@ export class Game {
   private state: GameState;
   /** Which player we are (1 or 2) - determines which soldiers we control */
   private localPlayer: 1 | 2 = 1;
-  /** Currently selected soldier index (0-4) or null */
+  /** Currently selected soldier index (0-4) or null — the "primary" selected soldier */
   private selectedSoldier: number | null = null;
+  /** All currently selected soldiers (for drag-select multi-selection) */
+  private selectedSoldiers: number[] = [];
   /** Seeded random number generator for deterministic simulation */
   private rng!: SeededRandom;
   /** Map wall data (cached for LOS checks) */
@@ -585,8 +587,8 @@ export class Game {
         this.state.currentRoundKills,
         localSide,
         /* Placeholder economy — server doesn't send detailed breakdown yet */
-        { roundReward: 0, killRewards: 0, objectiveBonus: 0, totalEarned: 0 },
-        { roundReward: 0, killRewards: 0, objectiveBonus: 0, totalEarned: 0 },
+        { roundReward: 0, killRewards: 0, killDetails: [], objectiveBonus: 0, totalEarned: 0, newBalance: 0, newLossStreak: 0 },
+        { roundReward: 0, killRewards: 0, killDetails: [], objectiveBonus: 0, totalEarned: 0, newBalance: 0, newLossStreak: 0 },
         data.bombPlanted,
         data.bombDefused,
       );
@@ -771,13 +773,14 @@ export class Game {
       type: type as import('@shared/types/MessageTypes').CommandType,
       soldierIndex,
       targetPosition: targetPos,
-      utilityType,
+      utilityType: utilityType as import('@shared/types/WeaponTypes').UtilityType | undefined,
+      timestamp: Date.now(),
     });
 
-    console.log(
-      `[MP] Sent ${type} for soldier ${soldierIndex}` +
-      (targetPos ? ` -> (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})` : '')
-    );
+    // console.log(
+    //   `[MP] Sent ${type} for soldier ${soldierIndex}` +
+    //   (targetPos ? ` -> (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})` : '')
+    // );
   }
 
   /**
@@ -962,14 +965,22 @@ export class Game {
       }
     }
 
-    /* --- Keyboard shortcuts --- */
+    /* --- Drag select: box-select multiple soldiers at once --- */
+    const completedDrag = this.input.consumeCompletedDrag();
+    if (completedDrag) {
+      this.handleDragSelect(completedDrag);
+    }
+
+    /* --- Keyboard shortcuts (apply to all selected soldiers when multi-selected) --- */
     if (this.input.wasKeyPressed('KeyH') && this.selectedSoldier !== null) {
-      /* Hold position command */
-      this.issueCommand(CommandType.HOLD, this.selectedSoldier);
+      /* Hold position command — applies to all selected soldiers */
+      const targets = this.selectedSoldiers.length > 0 ? this.selectedSoldiers : [this.selectedSoldier];
+      for (const idx of targets) this.issueCommand(CommandType.HOLD, idx);
     }
     if (this.input.wasKeyPressed('KeyR') && this.selectedSoldier !== null) {
-      /* Retreat command */
-      this.issueCommand(CommandType.RETREAT, this.selectedSoldier);
+      /* Retreat command — applies to all selected soldiers */
+      const targets = this.selectedSoldiers.length > 0 ? this.selectedSoldiers : [this.selectedSoldier];
+      for (const idx of targets) this.issueCommand(CommandType.RETREAT, idx);
     }
 
     /* --- Bomb plant/defuse (hold keys P and E) --- */
@@ -1006,7 +1017,7 @@ export class Game {
     if (this.input.wasKeyPressed('Tab')) {
       /* Toggle scoreboard */
       // TODO: Toggle scoreboard UI
-      console.log('[Input] Scoreboard toggle (TODO)');
+      // console.log('[Input] Scoreboard toggle (TODO)');
     }
 
     /* --- Utility slot selection (keys 1-4) --- */
@@ -1027,9 +1038,9 @@ export class Game {
           if (this.input.wasKeyPressed(utilityKeys[i])) {
             if (i < soldier.utility.length) {
               this.pendingUtilityType = soldier.utility[i] as UtilityType;
-              console.log(`[Input] Utility slot ${i + 1} selected: ${this.pendingUtilityType}`);
+              // console.log(`[Input] Utility slot ${i + 1} selected: ${this.pendingUtilityType}`);
             } else {
-              console.log(`[Input] Utility slot ${i + 1} is empty`);
+              // console.log(`[Input] Utility slot ${i + 1} is empty`);
               this.pendingUtilityType = null;
             }
           }
@@ -1038,7 +1049,7 @@ export class Game {
         /* Escape cancels pending utility throw */
         if (this.input.wasKeyPressed('Escape')) {
           if (this.pendingUtilityType) {
-            console.log('[Input] Utility throw cancelled');
+            // console.log('[Input] Utility throw cancelled');
             this.pendingUtilityType = null;
           }
         }
@@ -1067,16 +1078,16 @@ export class Game {
     const clickedSoldierIndex = this.findSoldierAtPosition(
       mySoldiers,
       { x: worldPos.x, z: worldPos.z },
-      30 // Click radius in world units
+      50 // Click radius in world units (generous for easier selection)
     );
 
     if (clickedSoldierIndex !== null) {
-      /* Clicked on a soldier - select it, and cancel any pending utility throw */
+      /* Clicked on a soldier - select it (clears multi-select), cancel pending utility */
       this.selectedSoldier = clickedSoldierIndex;
+      this.selectedSoldiers = [clickedSoldierIndex];
       this.pendingUtilityType = null;
       const prefix = this.localPlayer === 1 ? 'p1' : 'p2';
       this.soldierRenderer.setSelected(`${prefix}_${clickedSoldierIndex}`);
-      console.log(`[Input] Selected soldier ${clickedSoldierIndex}`);
     } else if (this.selectedSoldier !== null && this.pendingUtilityType !== null) {
       /* Utility throw mode: click on map to throw the selected utility */
       if (this.state.phase === GamePhase.LIVE_PHASE || this.state.phase === GamePhase.POST_PLANT) {
@@ -1092,32 +1103,52 @@ export class Game {
         this.pendingUtilityType = null;
       }
     } else if (this.selectedSoldier !== null) {
-      /* Clicked on empty map - issue move command to selected soldier */
+      /* Clicked on empty map - issue move command to all selected soldiers */
       if (this.state.phase === GamePhase.LIVE_PHASE || this.state.phase === GamePhase.POST_PLANT) {
-        this.issueCommand(CommandType.MOVE, this.selectedSoldier, {
-          x: worldPos.x,
-          z: worldPos.z,
-        });
+        /* Issue move to all soldiers in the multi-select group */
+        const soldiersToCommand = this.selectedSoldiers.length > 0
+          ? this.selectedSoldiers
+          : [this.selectedSoldier];
+        for (const idx of soldiersToCommand) {
+          this.issueCommand(CommandType.MOVE, idx, {
+            x: worldPos.x,
+            z: worldPos.z,
+          });
+        }
       } else if (this.state.phase === GamePhase.STRATEGY_PHASE) {
-        /* During strategy phase, add waypoint (direct placement, no A*) */
+        /* During strategy phase, add pathfound waypoint using A* */
         const soldier = mySoldiers[this.selectedSoldier];
-        if (soldier) {
-          soldier.waypoints.push({ x: worldPos.x, z: worldPos.z });
+        if (soldier && this.movementSystem) {
+          /* Pathfind from last waypoint (or current position) to clicked position */
+          const startPos = soldier.waypoints.length > 0
+            ? soldier.waypoints[soldier.waypoints.length - 1]
+            : soldier.position;
+          const rawPath = this.movementSystem.findPath(startPos, { x: worldPos.x, z: worldPos.z });
+          if (rawPath.length > 0) {
+            const smoothed = this.movementSystem.smoothPath(rawPath);
+            /* Append pathfound waypoints (skip first since it's the start position) */
+            for (let i = 1; i < smoothed.length; i++) {
+              soldier.waypoints.push({ x: smoothed[i].x, z: smoothed[i].z });
+            }
+          } else {
+            /* No path found — add direct waypoint as fallback */
+            soldier.waypoints.push({ x: worldPos.x, z: worldPos.z });
+          }
           const prefix = this.localPlayer === 1 ? 'p1' : 'p2';
           this.soldierRenderer.showWaypoints(
             `${prefix}_${this.selectedSoldier}`,
             soldier.waypoints,
             this.localPlayer === 1 ? '#ff6666' : '#6666ff'
           );
-          console.log(`[Input] Added waypoint for soldier ${this.selectedSoldier}`);
         }
       }
     }
   }
 
   /**
-   * Handle right click - issue rush command to selected soldier.
+   * Handle right click - issue rush command to selected soldier(s).
    * Rush = move fast but with accuracy penalty.
+   * When multi-selected, all soldiers in the group rush to the target.
    */
   private handleRightClick(screenX: number, screenY: number): void {
     if (this.selectedSoldier === null) return;
@@ -1126,10 +1157,69 @@ export class Game {
     const worldPos = this.renderer.getWorldPosition(screenX, screenY);
     if (!worldPos) return;
 
-    this.issueCommand(CommandType.RUSH, this.selectedSoldier, {
-      x: worldPos.x,
-      z: worldPos.z,
-    });
+    /* Issue rush to all soldiers in the multi-select group */
+    const soldiersToCommand = this.selectedSoldiers.length > 0
+      ? this.selectedSoldiers
+      : [this.selectedSoldier];
+    for (const idx of soldiersToCommand) {
+      this.issueCommand(CommandType.RUSH, idx, {
+        x: worldPos.x,
+        z: worldPos.z,
+      });
+    }
+  }
+
+  /**
+   * Handle a completed drag selection — select all friendly soldiers within the drag box.
+   *
+   * Converts the screen-space drag rect to world coordinates, then checks which
+   * alive friendly soldiers fall inside the world-space bounding box.
+   *
+   * @param dragRect - The completed drag rectangle in screen coordinates
+   */
+  private handleDragSelect(dragRect: DragRect): void {
+    /* Convert the four corners of the drag rect to world coordinates.
+     * We need min/max on both X and Z since the user can drag in any direction. */
+    const corner1 = this.renderer.getWorldPosition(dragRect.startX, dragRect.startY);
+    const corner2 = this.renderer.getWorldPosition(dragRect.endX, dragRect.endY);
+    if (!corner1 || !corner2) return;
+
+    /* Get the world-space bounding box */
+    const worldMinX = Math.min(corner1.x, corner2.x);
+    const worldMaxX = Math.max(corner1.x, corner2.x);
+    const worldMinZ = Math.min(corner1.z, corner2.z);
+    const worldMaxZ = Math.max(corner1.z, corner2.z);
+
+    /* Find all friendly alive soldiers within the box */
+    const mySoldiers = this.localPlayer === 1
+      ? this.state.player1Soldiers
+      : this.state.player2Soldiers;
+
+    const selected: number[] = [];
+    for (const soldier of mySoldiers) {
+      if (!soldier.alive) continue;
+      if (
+        soldier.position.x >= worldMinX && soldier.position.x <= worldMaxX &&
+        soldier.position.z >= worldMinZ && soldier.position.z <= worldMaxZ
+      ) {
+        selected.push(soldier.index);
+      }
+    }
+
+    if (selected.length > 0) {
+      /* Set multi-selection and make the first soldier the primary one */
+      this.selectedSoldiers = selected;
+      this.selectedSoldier = selected[0];
+      this.pendingUtilityType = null;
+
+      /* Show selection rings on all selected soldiers */
+      const prefix = this.localPlayer === 1 ? 'p1' : 'p2';
+      this.soldierRenderer.setSelected(`${prefix}_${selected[0]}`);
+      /* Highlight all others as part of the multi-select group */
+      for (let i = 1; i < selected.length; i++) {
+        this.soldierRenderer.addToSelection(`${prefix}_${selected[i]}`);
+      }
+    }
   }
 
   /**
@@ -1153,9 +1243,9 @@ export class Game {
     );
 
     if (accepted) {
-      console.log(`[Command] ${type} issued to soldier ${soldierIndex}${targetPos ? ` -> (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})` : ''}`);
+      // console.log(`[Command] ${type} issued to soldier ${soldierIndex}${targetPos ? ` -> (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})` : ''}`);
     } else {
-      console.log(`[Command] Rejected - soldier ${soldierIndex} on cooldown`);
+      // console.log(`[Command] Rejected - soldier ${soldierIndex} on cooldown`);
     }
   }
 
@@ -1188,7 +1278,7 @@ export class Game {
     /* Find the utility in the soldier's inventory */
     const utilIndex = soldier.utility.indexOf(utilityType);
     if (utilIndex === -1) {
-      console.log(`[Utility] Soldier ${soldierIndex} doesn't have ${utilityType}`);
+      // console.log(`[Utility] Soldier ${soldierIndex} doesn't have ${utilityType}`);
       return;
     }
 
@@ -1206,10 +1296,10 @@ export class Game {
       ownerTeam
     );
 
-    console.log(
-      `[Utility] Soldier ${soldierIndex} threw ${utilityType}` +
-      ` at (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})`
-    );
+    // console.log(
+    //   `[Utility] Soldier ${soldierIndex} threw ${utilityType}` +
+    //   ` at (${Math.round(targetPos.x)}, ${Math.round(targetPos.z)})`
+    // );
   }
 
   // ============================================================
@@ -1315,7 +1405,7 @@ export class Game {
         break;
 
       default:
-        console.log(`[Command] Unhandled command type: ${cmd.type}`);
+        // console.log(`[Command] Unhandled command type: ${cmd.type}`);
     }
   }
 
@@ -1902,7 +1992,7 @@ export class Game {
      * Taking a bullet breaks concentration and resets action progress.
      */
     if (target.isPlanting || target.isDefusing) {
-      console.log(`[Bomb] ${target.soldierId} interrupted while ${target.isPlanting ? 'planting' : 'defusing'} (took damage)`);
+      // console.log(`[Bomb] ${target.soldierId} interrupted while ${target.isPlanting ? 'planting' : 'defusing'} (took damage)`);
       target.isPlanting = false;
       target.isDefusing = false;
       target.actionProgress = 0;
@@ -1928,12 +2018,12 @@ export class Game {
       };
       this.state.currentRoundKills.push(killRecord);
 
-      console.log(
-        `[Combat] ${shooter.soldierId} killed ${target.soldierId}` +
-        ` with ${shooter.currentWeapon}` +
-        `${hitLocation === 'head' ? ' (HEADSHOT!)' : ''}` +
-        ` — ${damage.toFixed(0)} damage`
-      );
+      // console.log(
+      //   `[Combat] ${shooter.soldierId} killed ${target.soldierId}` +
+      //   ` with ${shooter.currentWeapon}` +
+      //   `${hitLocation === 'head' ? ' (HEADSHOT!)' : ''}` +
+      //   ` — ${damage.toFixed(0)} damage`
+      // );
     }
   }
 
@@ -2073,7 +2163,7 @@ export class Game {
         } else {
           /* Not in a plant zone — reset plant progress */
           if (soldier.isPlanting) {
-            console.log(`[Bomb] ${soldier.soldierId} left the plant zone — plant cancelled`);
+            // console.log(`[Bomb] ${soldier.soldierId} left the plant zone — plant cancelled`);
           }
           soldier.isPlanting = false;
           soldier.actionProgress = 0;
@@ -2138,7 +2228,7 @@ export class Game {
         } else {
           /* Out of range — reset defuse progress */
           if (soldier.isDefusing) {
-            console.log(`[Bomb] ${soldier.soldierId} moved out of defuse range — defuse cancelled`);
+            // console.log(`[Bomb] ${soldier.soldierId} moved out of defuse range — defuse cancelled`);
           }
           soldier.isDefusing = false;
           soldier.actionProgress = 0;
@@ -2588,6 +2678,21 @@ export class Game {
     this.state.timeRemaining = PHASE_DURATIONS[GamePhase.BUY_PHASE];
     this.state.tick = 0;
     this.gameTime = 0;
+
+    /* Auto-open buy menu so the player can purchase equipment */
+    if (!this.isMultiplayer) {
+      this.selectedSoldier = 0;
+      const prefix = this.localPlayer === 1 ? 'p1' : 'p2';
+      this.soldierRenderer.setSelected(`${prefix}_0`);
+      const mySoldiers = this.localPlayer === 1
+        ? this.state.player1Soldiers
+        : this.state.player2Soldiers;
+      const myEconomy = this.localPlayer === 1
+        ? this.state.player1Economy
+        : this.state.player2Economy;
+      this.buyMenu.show();
+      this.buyMenu.update(mySoldiers[0], myEconomy, this.state.player1Side);
+    }
 
     console.log(`[Phase] Round ${this.state.roundNumber} - Buy Phase`);
   }

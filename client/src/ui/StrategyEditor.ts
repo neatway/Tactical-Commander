@@ -150,10 +150,24 @@ export class StrategyEditor {
    */
   update(soldiers: SoldierRuntimeState[], selectedIndex: number): void {
     if (!this.visible) return;
-    this.soldiers = soldiers;
-    this.selectedIndex = selectedIndex >= 0 && selectedIndex < soldiers.length
+
+    /* Only re-render if selection changed or waypoint count changed.
+     * Re-rendering every frame destroys DOM elements and breaks click handlers. */
+    const newIndex = selectedIndex >= 0 && selectedIndex < soldiers.length
       ? selectedIndex
       : this.selectedIndex;
+    const currentSoldier = this.soldiers[this.selectedIndex];
+    const newSoldier = soldiers[newIndex];
+    const waypointsChanged = currentSoldier && newSoldier
+      && currentSoldier.waypoints.length !== newSoldier.waypoints.length;
+    const selectionChanged = newIndex !== this.selectedIndex;
+
+    this.soldiers = soldiers;
+    this.selectedIndex = newIndex;
+
+    /* Skip re-render if nothing changed (prevents DOM thrashing at 60fps) */
+    if (!selectionChanged && !waypointsChanged) return;
+
     this.render();
   }
 

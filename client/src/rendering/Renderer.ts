@@ -172,7 +172,8 @@ export class Renderer {
      *   the entire playable map area without shadow clipping
      */
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(500, 1000, 500);
+    /* Position light above map center (map is 3000x2000) for even coverage */
+    directionalLight.position.set(1500, 1000, 1000);
     directionalLight.castShadow = true;
     directionalLight.shadow.mapSize.width = 2048;
     directionalLight.shadow.mapSize.height = 2048;
@@ -185,6 +186,9 @@ export class Renderer {
     directionalLight.shadow.camera.near = 0.5;
     directionalLight.shadow.camera.far = 3000;
 
+    /* Point the light at the map center so shadows fall evenly */
+    directionalLight.target.position.set(1500, 0, 1000);
+    this.scene.add(directionalLight.target);
     this.scene.add(directionalLight);
 
     /**

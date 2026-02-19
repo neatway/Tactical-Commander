@@ -83,6 +83,8 @@ export class InputManager {
   private isDragging: boolean = false;
   /** The current drag rectangle (null if not dragging) */
   private dragRect: DragRect | null = null;
+  /** Completed drag rect waiting to be consumed by game loop (set on mouseup after drag) */
+  private completedDragRect: DragRect | null = null;
   /** Minimum pixels moved before a click becomes a drag */
   private readonly DRAG_THRESHOLD = 5;
   /** Where the mouse went down (to detect drag vs click) */
@@ -170,7 +172,15 @@ export class InputManager {
     this.canvas.addEventListener('mouseup', (e: MouseEvent) => {
       this.mouseButtonsDown.delete(e.button);
 
-      if (!this.isDragging) {
+      if (this.isDragging && this.dragRect) {
+        /* Drag completed — save the final rect for Game.ts to consume */
+        this.completedDragRect = {
+          startX: this.dragRect.startX,
+          startY: this.dragRect.startY,
+          endX: e.clientX,
+          endY: e.clientY,
+        };
+      } else {
         /* If we didn't drag, this is a click */
         this.clickQueue.push({
           button: e.button as MouseButton,
@@ -262,6 +272,17 @@ export class InputManager {
     return this.isDragging;
   }
 
+  /**
+   * Consume a completed drag selection. Call once per frame.
+   * Returns the final drag rect if a drag just finished, then clears it.
+   * This is the "drag equivalent" of consumeClicks().
+   */
+  consumeCompletedDrag(): DragRect | null {
+    const rect = this.completedDragRect;
+    this.completedDragRect = null;
+    return rect;
+  }
+
   // ============================================================
   // Camera pan helpers - Convenience methods for common checks
   // ============================================================
@@ -295,19 +316,21 @@ export class InputManager {
   /**
    * Check if a key code is a game key that should have default behavior prevented.
    * We don't want WASD to type in chat boxes or space to scroll the page.
+   * Uses a static Set (created once) to avoid allocating a new Set on every keydown.
    */
+  private static readonly GAME_KEYS = new Set([
+    'KeyW', 'KeyA', 'KeyS', 'KeyD',     // Camera pan
+    'Space',                               // Could be used for actions
+    'KeyH', 'KeyR', 'KeyG', 'KeyP',       // Hold, Retreat, Regroup, Plant
+    'KeyE',                                // Defuse bomb
+    'KeyB',                                // Buy menu toggle
+    'Digit1', 'Digit2', 'Digit3', 'Digit4', // Utility selection
+    'Tab',                                 // Scoreboard
+    'Escape',                              // Menu/cancel
+  ]);
+
   private isGameKey(code: string): boolean {
-    const gameKeys = new Set([
-      'KeyW', 'KeyA', 'KeyS', 'KeyD',     // Camera pan
-      'Space',                               // Could be used for actions
-      'KeyH', 'KeyR', 'KeyG', 'KeyP',       // Hold, Retreat, Regroup, Plant
-      'KeyE',                                // Defuse bomb
-      'KeyB',                                // Buy menu toggle
-      'Digit1', 'Digit2', 'Digit3', 'Digit4', // Utility selection
-      'Tab',                                 // Scoreboard
-      'Escape',                              // Menu/cancel
-    ]);
-    return gameKeys.has(code);
+    return InputManager.GAME_KEYS.has(code);
   }
 
   /**
